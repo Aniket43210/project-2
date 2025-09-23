@@ -15,6 +15,7 @@ try:  # pragma: no cover
     from astropy.io import fits  # type: ignore  
 except Exception:  # pragma: no cover
     fits = None  # type: ignore
+    
 from typing import Dict, List, Optional, Tuple, Any
 import warnings
 import os
