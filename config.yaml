@@ -1,0 +1,199 @@
+# Multi-modal Stellar Analysis Platform Configuration
+
+# General settings
+general:
+  project_name: "stellar_platform"
+  data_dir: "data"
+  models_dir: "models"
+  results_dir: "results"
+  log_level: "INFO"
+  random_seed: 42
+
+# Data ingestion settings
+data:
+  surveys:
+    sdss:
+      base_url: "http://data.sdss.org/sas/dr17"
+      data_release: "DR17"
+      default_bands: ["u", "g", "r", "i", "z"]
+
+    gaia:
+      data_release: "DR3"
+      default_bands: ["G", "BP", "RP"]
+
+    kepler:
+      data_author: "Kepler"
+      default_cadence: "long"
+
+    tess:
+      data_author: "SPOC"
+      default_cadence: "short"
+
+# Preprocessing settings
+preprocessing:
+  spectral:
+    wavelength_grid: np.linspace(3500, 9500, 4000)  # Angstroms
+    continuum_method: "spline"
+    continuum_order: 3
+    mask_threshold: 3.0
+
+  lightcurve:
+    detrend_method: "polynomial"
+    detrend_order: 2
+    max_gap: 0.1  # Fraction of observation span
+    fill_method: "linear"
+    segment_length: 100
+    segment_overlap: 0.1
+
+  sed:
+    band_mapping: {
+      "u": "SDSS_u",
+      "g": "SDSS_g",
+      "r": "SDSS_r",
+      "i": "SDSS_i",
+      "z": "SDSS_z",
+      "G": "Gaia_G",
+      "BP": "Gaia_BP",
+      "RP": "Gaia_RP"
+    }
+    extinction_law: "ccm89"
+
+# Model settings
+models:
+  spectral:
+    cnn:
+      filters: [32, 64, 128]
+      kernel_sizes: [3, 3, 3]
+      pool_sizes: [2, 2, 2]
+      dense_units: [128]
+      dropout_rate: 0.5
+
+    transformer:
+      num_heads: 4
+      ff_dim: 128
+      num_transformer_blocks: 2
+      mlp_units: [128, 64]
+      dropout_rate: 0.1
+
+    multitask:
+      base_architecture: "transformer"
+      loss_weights: {
+        "class_output": 1.0,
+        "param_output": 0.5
+      }
+
+  lightcurve:
+    transformer:
+      num_heads: 4
+      ff_dim: 128
+      num_transformer_blocks: 2
+      mlp_units: [128, 64]
+      dropout_rate: 0.1
+
+    multitask:
+      loss_weights: {
+        "class_output": 1.0,
+        "param_output": 0.5
+      }
+
+  sed:
+    classifier:
+      n_estimators: 100
+      learning_rate: 0.1
+      max_depth: 3
+      min_samples_split: 2
+      min_samples_leaf: 1
+
+    regressor:
+      n_estimators: 100
+      learning_rate: 0.1
+      max_depth: 3
+      min_samples_split: 2
+      min_samples_leaf: 1
+
+# Evaluation settings
+evaluation:
+  metrics:
+    classification:
+      - "accuracy"
+      - "precision"
+      - "recall"
+      - "f1"
+      - "mcc"
+      - "auc"
+      - "pr"
+
+    regression:
+      - "mse"
+      - "rmse"
+      - "mae"
+      - "r2"
+
+    calibration:
+      - "brier"
+      - "reliability"
+
+  plots:
+    confusion_matrix: true
+    roc_curve: true
+    pr_curve: true
+    residual_plots: true
+    calibration_plots: true
+
+# Serving settings
+serving:
+  api:
+    host: "0.0.0.0"
+    port: 8000
+    workers: 4
+    timeout: 30
+
+  batch:
+    max_batch_size: 1000
+    max_queue_size: 100
+    worker_timeout: 300
+
+  monitoring:
+    drift_detection: true
+    performance_monitoring: true
+    calibration_monitoring: true
+
+# MLOps settings
+mlops:
+  airflow:
+    dag_folder: "dags"
+    postgres_url: "postgresql://user:password@localhost:5432/airflow"
+    redis_url: "redis://localhost:6379"
+
+  mlflow:
+    tracking_uri: "mlruns"
+    experiment_name: "stellar_platform"
+
+  registry:
+    model_dir: "registry"
+    artifact_dir: "artifacts"
+
+# Security settings
+security:
+  authentication:
+    enabled: true
+    method: "jwt"
+    secret_key: "your-secret-key-here"
+    algorithm: "HS256"
+    access_token_expire_minutes: 30
+
+  authorization:
+    enabled: true
+    roles: ["admin", "user", "viewer"]
+
+  encryption:
+    enabled: true
+    key: "your-encryption-key-here"
+
+# Logging settings
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/stellar_platform.log"
+  max_size: "10MB"
+  backup_count: 5

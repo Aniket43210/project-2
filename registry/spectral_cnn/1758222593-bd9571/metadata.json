@@ -1,0 +1,17 @@
+{
+  "name": "spectral_cnn",
+  "version": "1758222593-bd9571",
+  "artifacts": {
+    "model": "artifacts\\spectral_cnn_dummy.h5"
+  },
+  "metrics": {
+    "dummy_loss": 0.0
+  },
+  "tags": {},
+  "params": {},
+  "registered_at": "2025-09-18T19:09:53Z",
+  "calibrator": {
+    "type": "TemperatureScaler",
+    "temperature": 0.05
+  }
+}

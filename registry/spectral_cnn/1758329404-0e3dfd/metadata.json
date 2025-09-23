@@ -1,0 +1,30 @@
+{
+  "name": "spectral_cnn",
+  "version": "1758329404-0e3dfd",
+  "artifacts": {
+    "model": "artifacts\\spectral_cnn_dummy.h5"
+  },
+  "artifact_hashes": {
+    "model": "7b160deb64f8b0466d16b35e5e0c79d331f3377887ab1c774f3795750fbb86e1"
+  },
+  "metrics": {
+    "dummy_loss": 0.0
+  },
+  "tags": {},
+  "params": {
+    "num_classes": 3,
+    "length": 256,
+    "dummy": false
+  },
+  "registered_at": "2025-09-20T00:50:04Z",
+  "calibrator": {
+    "type": "TemperatureScaler",
+    "temperature": 0.3
+  },
+  "headline_metrics": {
+    "accuracy": 0.328125,
+    "macro_f1": 0.16470588235294117,
+    "mcc": 0.0,
+    "ece": 0.03310513496398926
+  }
+}

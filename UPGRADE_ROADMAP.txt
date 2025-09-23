@@ -1,0 +1,206 @@
+Stellar Platform Upgrade Roadmap
+================================
+
+Purpose:
+This document enumerates the improvements required to evolve the current prototype (dummy models + minimal infrastructure) into a robust, production-grade, scientifically credible multi‑modal stellar analysis platform. Items are grouped by domain with rationale, suggested approach, complexity (S=small, M=medium, L=large, R=research), dependencies, and an indicative priority tier (P1 high, P2 medium, P3 later).
+
+Legend:
+[Pn][Size] Component - Title :: Rationale / Action
+
+------------------------------------------------------------------
+1. Data Ingestion & Management
+------------------------------------------------------------------
+[P1][M] Unified Data Schema & Validation Layer :: Define canonical object schema (source identifiers, photometry, spectra, time-series, meta flags) with pydantic models; enforce in ingestion.
+[P1][M] Provenance Tracking :: Attach source metadata (survey name, retrieval timestamp, query params, version) to each record; store in a lightweight metadata store (e.g., parquet sidecar, sqlite, or Postgres).
+[P1][L] Incremental / Batch Sync Pipelines :: Implement idempotent harvesters for Gaia, SDSS, TESS/Kepler (cursor-based or timestamp-based); schedule via workflow engine (Prefect / Airflow) with recovery semantics.
+[P2][M] Caching & Rate Limiting :: Local HTTP cache (requests + disk) for astroquery calls; exponential backoff & concurrency limits.
+[P2][S] Data Quality Flags Handling :: Ingest and propagate survey quality flags; mask or weight observations accordingly.
+[P2][M] Cross-Matching Service :: Implement sky-coordinate KD-tree or use astroquery cross-matching to unify multi-survey sources; persist cross-match table with versioning.
+[P3][L] Data Lake Organization :: Partition raw/processed datasets in data lake layout (e.g., /raw/<survey>/<date>/, /curated/<release>/) using Parquet for columnar efficiency.
+[P3][M] HEALPix Spatial Indexing :: Pre-compute healpix indices for fast regional queries & stratified splits (leveraging healpy, store as column).
+
+------------------------------------------------------------------
+2. Preprocessing & Feature Engineering
+------------------------------------------------------------------
+[P1][M] Robust Spectral Preprocessing :: Wavelength grid unification (interpolation with vacuum/air conversion), continuum normalization, telluric line masking.
+[P1][M] Lightcurve Cleaning Enhancements :: Outlier removal (sigma clipping), gap-aware interpolation, detrending with robust regression (LOESS or spline), period search (Lomb–Scargle) feature outputs.
+[P1][S] SED Assembly Improvements :: Convert heterogeneous photometric systems to common flux units (Jy / erg s^-1 cm^-2 Å^-1); propagate uncertainties.
+[P2][M] Error Propagation :: Track measurement uncertainties through transformations; attach variance arrays to tensors for uncertainty-aware models.
+[P2][M] Automated Feature Store :: Materialize derived features (period, amplitude metrics, color indices) with version tags for reproducibility.
+[P3][R] Physics-Informed Augmentations :: Simulate realistic noise, extinction variations, and instrument response curves for data augmentation.
+
+------------------------------------------------------------------
+3. Modeling (Spectral)
+------------------------------------------------------------------
+[P1][M] Real Spectral CNN/Transformer Training :: Replace dummy with real pipeline (dataloader, batching, normalization, metrics) using actual labeled spectral classes or regression targets.
+[P1][S] Configurable Architecture Registry :: YAML/JSON-driven model hyperparameters (layers, filters, kernel sizes) to enable rapid experimentation.
+[P1][M] Loss & Metric Suite :: Add focal loss (for class imbalance), top-k accuracy, AUC, calibration metrics integrated in training loop.
+[P2][M] Multi-Task Heads :: Separate heads for classification (type), regression (Teff, log g, metallicity), uncertainty predictions (aleatoric via variance head).
+[P2][L] Transfer Learning :: Pretrain on large unlabeled spectra with masked token prediction (Transformer) or autoencoding; finetune supervised.
+[P3][R] Physics-Constrained Layers :: Custom layers enforcing line ratios or energy conservation; differentiable radiative transfer approximations.
+
+------------------------------------------------------------------
+4. Modeling (Lightcurves)
+------------------------------------------------------------------
+[P1][M] Sequence Length Handling :: Windowing & padding strategy + dynamic masking; ensure models accept varied cadence lengths.
+[P1][M] Data Loader with Augmentation :: Random cropping, time-warping, magnitude jitter respecting photometric noise model.
+[P1][S] Baseline Benchmark Models :: Add classical baselines (RandomForest on extracted features, 1D CNN) for performance comparisons.
+[P2][M] Periodicity-Aware Models :: Incorporate folded phase representations or use temporal convolution with dilations; compare to transformer.
+[P2][L] Multi-Modal Fusion :: Joint embedding of periodogram + raw sequence + contextual meta (color indices, sky region).
+[P3][R] Neural ODE / Continuous Time Models :: Handle irregular sampling directly without resampling losses.
+
+------------------------------------------------------------------
+5. Calibration & Uncertainty
+------------------------------------------------------------------
+[P1][S] Integrate Calibration in Serving :: Persist chosen calibration method & automatically apply unless disabled via query param.
+[P1][S] Confidence Interval Outputs :: Return entropy / max-prob / ECE summary per batch for monitoring.
+[P2][M] Ensemble & MC Dropout :: Support predictive distribution aggregation.
+[P2][M] Conformal Prediction :: Implement split conformal sets for classification (adaptive prediction sets) with coverage guarantees.
+[P3][R] Bayesian Neural Networks / Deep Ensembles :: Provide epistemic + aleatoric separation.
+
+------------------------------------------------------------------
+6. Evaluation & Monitoring
+------------------------------------------------------------------
+[P1][S] Standardized Evaluation CLI :: Script to run full evaluation suite across validation/test sets with JSON report.
+[P1][M] Stratified Metrics :: Break down performance by magnitude, SNR, galactic latitude, etc.
+[P1][S] Model Card Generation :: Auto-generate markdown (data provenance, metrics, limitations) at registration.
+[P2][M] Drift Detection :: Monitor input distribution shifts (KS tests, embedding population stats) & calibration drift.
+[P2][M] Online Feedback Loop :: Optional endpoint to log post-deployment labels for continual learning.
+[P3][L] Active Learning Loop :: Sampling strategies (uncertainty, diversity) to prioritize new labeling.
+
+------------------------------------------------------------------
+7. Serving & Infrastructure
+------------------------------------------------------------------
+[P1][S] Graceful Model Cache :: LRU cache for loaded models; periodic refresh of latest symlink.
+[P1][S] Structured Logging & Correlation IDs :: JSON logs with request_id; include model version & latency.
+[P1][M] Input Validation Hardening :: Pydantic schemas with bounds (length ranges, numeric limits) and helpful error messages.
+[P1][S] Timeout & Circuit Breakers :: Guard long model loads; return 503 with retry-after headers.
+[P2][M] Batch & Async Inference :: Add background task queue (e.g., Redis + RQ / Celery) for large batches.
+[P2][L] Horizontal Scaling :: Containerize (Docker), add gunicorn with multiple workers or deploy on Kubernetes.
+[P2][M] Auth & Quotas :: API key or OAuth2; enforce per-user rate limits.
+[P3][L] Streaming Ingestion Endpoint :: WebSocket / SSE for progressive lightcurve updates and incremental inference.
+
+------------------------------------------------------------------
+8. Registry & Experiment Management
+------------------------------------------------------------------
+[P1][S] Artifact Integrity Hashes :: Store SHA256 for each artifact; verify at load.
+[P1][S] Atomic Registration :: Write metadata then atomic rename to avoid partial states.
+[P1][M] Promotion Policies :: Implement quality gates (min metric thresholds) before updating 'latest'.
+[P2][M] Model Lineage Tracking :: Store parent version, data snapshot id, code git commit hash.
+[P2][S] Rollback Command :: CLI to revert 'latest' to prior version.
+[P3][M] External Registry Bridge :: Optional sync to MLflow or Weights & Biases with richer metadata.
+
+------------------------------------------------------------------
+9. Configuration & Orchestration
+------------------------------------------------------------------
+[P1][S] Central Config File :: Hydra / pydantic-settings for hierarchical config (env overrides).
+[P1][S] Reproducible Seeds :: Global deterministic seed initialization across numpy, TF, torch (if added).
+[P2][M] Pipeline Orchestration :: End-to-end training DAG (ingest -> preprocess -> train -> eval -> register -> deploy).
+[P3][M] Multi-Environment Promotion :: Dev/Staging/Prod separations with gated promotion commands.
+
+------------------------------------------------------------------
+10. Testing & Quality Assurance
+------------------------------------------------------------------
+[P1][S] Unit Tests for New Loaders :: Cover shape, dtype, edge cases (empty spectra, NaNs).
+[P1][S] API Contract Tests :: JSON schema validation, error pathway tests.
+[P1][S] Deterministic Dummy Fixtures :: Seeded dummy artifact generation for stable CI.
+[P2][M] Integration Test Dataset :: Small curated set with expected outputs to validate end-to-end pipeline deterministically.
+[P2][M] Performance Regression Tests :: Track inference latency & memory usage baseline.
+[P3][M] Chaos / Fault Injection :: Simulate partial registry corruption, slow IO, transient network faults.
+
+------------------------------------------------------------------
+11. Performance & Optimization
+------------------------------------------------------------------
+[P1][S] Lazy / Streaming Loading :: Memory-map large arrays instead of loading wholly.
+[P1][M] Vectorized Preprocessing :: Replace Python loops with numpy / numba where hotspots identified.
+[P2][M] Mixed Precision Inference :: Enable fp16 where stable; benchmark speed vs accuracy.
+[P2][L] Model Quantization :: Post-training quantization or TensorRT conversion for GPU inference.
+[P3][L] Approximate Nearest Neighbor Embeddings :: For similarity search across spectra/lightcurves.
+
+------------------------------------------------------------------
+12. Security & Compliance
+------------------------------------------------------------------
+[P1][S] Input Size Limits :: Reject payloads beyond configured max length/count.
+[P1][S] Dependency Vulnerability Scan :: Regular safety / pip-audit in CI.
+[P2][M] Audit Logging :: Record who invoked predictions (when auth added).
+[P3][M] PII Review & Data Governance :: Ensure no sensitive data leak (mostly astronomical, but review user metadata if any added later).
+
+------------------------------------------------------------------
+13. Observability & Ops
+------------------------------------------------------------------
+[P1][S] Basic Metrics :: Request counts, latency histograms, error rates (Prometheus exposition endpoint).
+[P1][S] Health Detail :: /health extended with model registry status and version info.
+[P2][M] Tracing :: OpenTelemetry integration for end-to-end request spans.
+[P2][M] Alerting :: Threshold-based alerts on error rate/drift metric changes.
+[P3][M] SLA/SLO Dashboard :: Define availability & latency objectives with burn rate alerts.
+
+------------------------------------------------------------------
+14. Documentation & Developer Experience
+------------------------------------------------------------------
+[P1][S] Quickstart Guide :: From clone to prediction in <5 minutes with real sample data.
+[P1][S] API Reference :: Auto-generated via FastAPI docs plus curated examples.
+[P1][S] Contributing Guide :: Coding standards, branching model, test requirements, commit message style.
+[P2][S] Design Docs :: High-level architecture diagrams, data flow, model training pipeline doc.
+[P2][M] Benchmark Report Template :: Reusable notebook or script summarizing key metrics.
+[P3][S] Scientific Validation Appendix :: Methods for reproducibility, assumptions, and limitations.
+
+------------------------------------------------------------------
+15. Data & Model Governance
+------------------------------------------------------------------
+[P1][S] Dataset Snapshot Versioning :: Immutable dataset ids used in model metadata.
+[P1][S] License & Attribution Tracking :: Record survey data usage terms; embed attribution in model card.
+[P2][M] Bias & Fairness Analysis :: Examine performance across magnitude bins / sky regions (avoid selection bias).
+[P3][R] Automated Anomaly Flagging :: Flag improbable predictions for manual review.
+
+------------------------------------------------------------------
+16. Roadmap Execution Strategy
+------------------------------------------------------------------
+Phase 0 (Now - Stabilize Prototype): Complete dummy-to-real scaffolding for one modality (spectral) end-to-end with minimal real dataset slice.
+Phase 1 (Foundations): Implement ingestion schema, real training loop, evaluation CLI, registry hardening, logging/metrics.
+Phase 2 (Reliability & Scale): Add calibration in serving by default, auth/rate limiting, orchestration DAG, drift detection, multi-task modeling.
+Phase 3 (Advanced Science & Optimization): Transfer learning, uncertainty quantification (conformal + ensembles), performance tuning (quantization), physics-informed components.
+Phase 4 (MLOps Maturity): Active learning, automated promotion gates, multi-env deployment, advanced observability and SLA tracking.
+
+------------------------------------------------------------------
+17. Immediate Next High-Impact Tasks (Suggested Starting Backlog)
+------------------------------------------------------------------
+1. Implement canonical data object pydantic models (P1).
+2. Add real spectral dataset loader + training loop producing first non-dummy model (P1).
+3. Add evaluation CLI + model card generation (P1).
+4. Structured logging & request metrics in API (P1).
+5. Artifact integrity hashes & atomic registration (P1).
+6. Input validation hardening & length bounds (P1).
+7. Deterministic seeding across all random number generators (P1).
+8. Add baseline classical models for lightcurves + comparison report (P1/P2).
+
+------------------------------------------------------------------
+18. Risk Register (Selected)
+------------------------------------------------------------------
+- Data Drift: High risk once real data streaming; mitigate with drift monitors early.
+- Calibration Degradation: Temperature scaling may degrade under distribution shift; plan periodic recalibration.
+- Resource Constraints: Large spectra/LC datasets may exceed memory; require streaming & chunked preprocessing.
+- Dependency Volatility: Astronomy libs version churn; pin & add compatibility tests.
+- Silent Model Failures: Without integrity hashes & validation, corrupted artifacts could serve; prioritize registry hardening.
+
+------------------------------------------------------------------
+19. Success Metrics (Illustrative)
+------------------------------------------------------------------
+- Model Accuracy: >= baseline classical model + X% improvement.
+- Calibration: ECE <= 0.05 on validation.
+- Serving Latency: p95 < 300ms for batch size 1 (dummy) / <800ms real.
+- Uptime: > 99% (later phases).
+- Data Freshness: New survey ingest latency < 24h.
+- Reproducibility: Ability to re-train a model version (hash match) within 5% metric variance.
+
+------------------------------------------------------------------
+20. Appendix: Tool/Libraries Candidates
+------------------------------------------------------------------
+- Workflow: Prefect or Airflow.
+- Feature Store: Feast (optional) or lightweight parquet-based store.
+- Experiment Tracking: MLflow or Weights & Biases.
+- Observability: Prometheus + Grafana, OpenTelemetry.
+- Serving Scale: Docker + Kubernetes (KNative / FastAPI + Gunicorn / Uvicorn workers).
+- Data Storage: Parquet (columnar), PostgreSQL for metadata, MinIO/S3 for large artifacts.
+- Visualization: Jupyter + Bokeh/Plotly for exploratory spectral/LC plots.
+
+End of document.

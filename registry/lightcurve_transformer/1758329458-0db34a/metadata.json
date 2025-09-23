@@ -1,0 +1,30 @@
+{
+  "name": "lightcurve_transformer",
+  "version": "1758329458-0db34a",
+  "artifacts": {
+    "model": "artifacts\\lightcurve_transformer_dummy.h5"
+  },
+  "artifact_hashes": {
+    "model": "6c9f5cc1f3228943b1b3f9604edd18ced8444607ca2a7a40c3951130e7871338"
+  },
+  "metrics": {
+    "dummy_loss": 0.0
+  },
+  "tags": {},
+  "params": {
+    "num_classes": 3,
+    "length": 256,
+    "dummy": false
+  },
+  "registered_at": "2025-09-20T00:50:59Z",
+  "calibrator": {
+    "type": "TemperatureScaler",
+    "temperature": 0.05
+  },
+  "headline_metrics": {
+    "accuracy": 0.2890625,
+    "macro_f1": 0.28619338146217393,
+    "mcc": -0.0670851089581076,
+    "ece": 0.24265119103229707
+  }
+}
