@@ -2,10 +2,10 @@
   "name": "spectral_cnn",
   "version": "1758329404-0e3dfd",
   "artifacts": {
-    "model": "artifacts\\spectral_cnn_dummy.h5"
+    "model": "artifacts\\spectral_cnn_1758222593-bd9571.keras"
   },
   "artifact_hashes": {
-    "model": "7b160deb64f8b0466d16b35e5e0c79d331f3377887ab1c774f3795750fbb86e1"
+    "model": "3d3aa8d8153c434064608debdbdc4d7cda6d801e2e55fef921a6fc3e26b507b0"
   },
   "metrics": {
     "dummy_loss": 0.0

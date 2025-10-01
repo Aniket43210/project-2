@@ -162,9 +162,14 @@ class SpectralClassifier:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        # Normalize extension to native Keras format
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.suffix.lower() not in {'.keras'}:
+            p = p.with_suffix('.keras')
         # Save model and config
-        self.model.save(path)
-        config_path = path.replace(".h5", "_config.json")
+        self.model.save(str(p))
+        config_path = str(p.with_suffix('')) + "_config.json"
         with open(config_path, "w") as f:
             json.dump({
                 "input_shape": self.input_shape,
@@ -179,11 +184,18 @@ class SpectralClassifier:
         Args:
             path: Path to the saved model
         """
-        # Load model
-        self.model = keras.models.load_model(path)
+        # Load model (supports .keras)
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.suffix.lower() not in {'.keras'}:
+            # try native format by switching suffix
+            cand = p.with_suffix('.keras')
+            if cand.exists():
+                p = cand
+        self.model = keras.models.load_model(str(p))
 
         # Load config
-        config_path = path.replace(".h5", "_config.json")
+        config_path = str(p.with_suffix('')) + "_config.json"
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 config = json.load(f)

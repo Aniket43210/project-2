@@ -52,10 +52,10 @@ def train_spectral(args):
         spec = spectral_models.SpectralCNN(input_shape=(args.length, 1), num_classes=args.classes)
         spec.build_model()
         spec.compile_model()
-        spec.model.fit(X, np.eye(args.classes)[y], epochs=1, verbose=0)
+        spec.model.fit(X, np.eye(args.classes)[y], epochs=args.epochs, batch_size=args.batch_size, verbose=0)
         logits = spec.model.predict(X, verbose=0)
-        artifact_path = Path(args.output_dir) / "spectral_cnn_dummy.h5"
-        spec.model.save(artifact_path)
+        artifact_path = Path(args.output_dir) / "spectral_cnn.keras"
+        spec.model.save(str(artifact_path))
         artifacts = {"model": str(artifact_path)}
     else:
         if tf is None and not getattr(args, 'force_dummy', False):
@@ -80,6 +80,8 @@ def train_spectral(args):
     meta_path = registry.root / "spectral_cnn" / version / "metadata.json"
     meta = json.loads(meta_path.read_text())
     meta["calibrator"] = scaler.to_dict()
+    if 'seed_used' in locals():
+        meta["seed"] = int(seed_used)
     # Auto evaluation headline metrics
     try:
         metrics = generate_real_metrics('spectral_cnn', meta, n_eval=128)
@@ -106,10 +108,10 @@ def train_lightcurve(args):
         lcm = lc_models.LightCurveTransformer(input_shape=(args.length, 1), num_classes=args.classes)
         lcm.build_model()
         lcm.compile_model()
-        lcm.model.fit(X, np.eye(args.classes)[y], epochs=1, verbose=0)
+        lcm.model.fit(X, np.eye(args.classes)[y], epochs=args.epochs, batch_size=args.batch_size, verbose=0)
         logits = lcm.model.predict(X, verbose=0)
-        artifact_path = Path(args.output_dir) / "lightcurve_transformer_dummy.h5"
-        lcm.model.save(artifact_path)
+        artifact_path = Path(args.output_dir) / "lightcurve_transformer.keras"
+        lcm.model.save(str(artifact_path))
         artifacts = {"model": str(artifact_path)}
     else:
         if tf is None and not getattr(args, 'force_dummy', False):
@@ -133,6 +135,8 @@ def train_lightcurve(args):
     meta_path = registry.root / "lightcurve_transformer" / version / "metadata.json"
     meta = json.loads(meta_path.read_text())
     meta["calibrator"] = scaler.to_dict()
+    if 'seed_used' in locals():
+        meta["seed"] = int(seed_used)
     try:
         metrics = generate_real_metrics('lightcurve_transformer', meta, n_eval=128)
         headline = {k: metrics[k] for k in ('accuracy', 'macro_f1', 'mcc', 'ece') if k in metrics}
@@ -152,6 +156,8 @@ def main():
     sp.add_argument("--length", type=int, default=256)
     sp.add_argument("--classes", type=int, default=3)
     sp.add_argument("--output-dir", type=str, default="artifacts")
+    sp.add_argument("--epochs", type=int, default=1)
+    sp.add_argument("--batch-size", type=int, default=32)
     sp.add_argument("--force-dummy", action="store_true", help="Force creation of dummy (non-TF) model artifact")
     sp.set_defaults(func=train_spectral)
 
@@ -160,6 +166,8 @@ def main():
     lp.add_argument("--length", type=int, default=256)
     lp.add_argument("--classes", type=int, default=3)
     lp.add_argument("--output-dir", type=str, default="artifacts")
+    lp.add_argument("--epochs", type=int, default=1)
+    lp.add_argument("--batch-size", type=int, default=32)
     lp.add_argument("--force-dummy", action="store_true", help="Force creation of dummy (non-TF) model artifact")
     lp.set_defaults(func=train_lightcurve)
 

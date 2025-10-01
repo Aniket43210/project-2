@@ -6,15 +6,15 @@ and estimating physical parameters from light curves.
 """
 
 import numpy as np
-import tensorflow as tf
 from typing import Dict, List, Optional, Tuple, Any, Union
-keras = tf.keras  # unified keras usage
-layers = keras.layers
+# Defer TensorFlow/Keras imports to runtime to make module lightweight for tests
+tf = None  # type: ignore
+keras = None  # type: ignore
+layers = None  # type: ignore
 import os
 import json
 from astropy.timeseries import TimeSeries  # type: ignore
 from scipy.interpolate import interp1d  # Added for gap filling logic
-from tensorflow.keras import Model as KerasModel  # type: ignore
 
 
 class LightCurveProcessor:
@@ -131,25 +131,37 @@ class LightCurveProcessor:
         method = self.config.get("fill_method", "linear")
 
         if method == "linear":
-            # Find gaps
+            # Identify large gaps by time spacing
             time_diffs = np.diff(time)
-            gap_threshold = self.config.get("gap_threshold", np.median(time_diffs) * 5)
+            median_dt = np.median(time_diffs) if len(time_diffs) > 0 else 1.0
+            gap_threshold = self.config.get("gap_threshold", median_dt * 5)
             gap_indices = np.where(time_diffs > gap_threshold)[0]
 
-            # Fill gaps
-            filled_flux = flux.copy()
+            filled = flux.copy()
             for idx in gap_indices:
-                t1, t2 = time[idx], time[idx+1]
-                f1, f2 = flux[idx], flux[idx+1]
-
-                # Create time points for the gap
-                gap_times = np.linspace(t1, t2, int((t2 - t1) / np.median(np.diff(time))))
-
-                # Interpolate
-                interp = interp1d([t1, t2], [f1, f2], kind="linear")
-                filled_flux[idx+1] = interp(gap_times[1:])
-
-            return filled_flux
+                # indices between idx and idx+1 are missing; we interpolate a ramp
+                t1, t2 = time[idx], time[idx + 1]
+                f1, f2 = filled[idx], filled[idx + 1]
+                if not np.isfinite(f1) or not np.isfinite(f2):
+                    # if edges are nan, skip
+                    continue
+                span = int(round((t2 - t1) / median_dt))
+                if span <= 1:
+                    continue
+                # Linear values from f1 to f2 with span+1 samples; overwrite interior
+                ramp = np.linspace(f1, f2, span + 1)
+                # place interior points into filled (no actual intermediate indices exist; best-effort)
+                # choose closest index range
+                # Here we simply smooth neighbors to reduce discontinuity
+                filled[idx] = (filled[idx] + ramp[0]) / 2.0
+                filled[idx + 1] = (filled[idx + 1] + ramp[-1]) / 2.0
+            # If there are NaNs (from original missing points), interpolate over them directly
+            if np.any(~np.isfinite(filled)):
+                n = len(filled)
+                good = np.isfinite(filled)
+                if good.any():
+                    filled[~good] = np.interp(np.flatnonzero(~good), np.flatnonzero(good), filled[good])
+            return filled
         else:
             return flux
 
@@ -218,6 +230,8 @@ class LightCurveClassifier:
         if metrics is None:
             metrics = ["accuracy"]
 
+        if self.model is None:
+            raise ValueError("Model has not been built")
         self.model.compile(
             optimizer=optimizer,
             loss=loss,
@@ -232,7 +246,7 @@ class LightCurveClassifier:
         y_val: np.ndarray,
         batch_size: int = 32,
         epochs: int = 100,
-    callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
+    callbacks: Optional[List[Any]] = None,
         class_weight: Optional[Dict[int, float]] = None
     ) -> Dict[str, Any]:
         """
@@ -258,13 +272,14 @@ class LightCurveClassifier:
             callbacks = []
 
         # Add early stopping callback if not provided
-        if not any(isinstance(cb, keras.callbacks.EarlyStopping) for cb in callbacks):
-            early_stopping = keras.callbacks.EarlyStopping(
-                monitor="val_loss",
-                patience=10,
-                restore_best_weights=True
-            )
-            callbacks.append(early_stopping)
+        if keras is not None:
+            if not any(isinstance(cb, getattr(keras.callbacks, 'EarlyStopping')) for cb in callbacks):
+                early_stopping = keras.callbacks.EarlyStopping(
+                    monitor="val_loss",
+                    patience=10,
+                    restore_best_weights=True
+                )
+                callbacks.append(early_stopping)
 
         # Train the model
         self.history = self.model.fit(
@@ -342,9 +357,14 @@ class LightCurveClassifier:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        # Normalize extension to native Keras format
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.suffix.lower() not in {'.keras'}:
+            p = p.with_suffix('.keras')
         # Save model and config
-        self.model.save(path)
-        config_path = path.replace(".h5", "_config.json")
+        self.model.save(str(p))
+        config_path = str(p.with_suffix('')) + "_config.json"
         with open(config_path, "w") as f:
             json.dump({
                 "input_shape": self.input_shape,
@@ -359,11 +379,17 @@ class LightCurveClassifier:
         Args:
             path: Path to the saved model
         """
-        # Load model
-        self.model = keras.models.load_model(path)
+        # Load model (supports .keras)
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.suffix.lower() not in {'.keras'}:
+            cand = p.with_suffix('.keras')
+            if cand.exists():
+                p = cand
+        self.model = keras.models.load_model(str(p))
 
         # Load config
-        config_path = path.replace(".h5", "_config.json")
+        config_path = str(p.with_suffix('')) + "_config.json"
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 config = json.load(f)
@@ -384,6 +410,15 @@ class LightCurveTransformer(LightCurveClassifier):
         Returns:
             Compiled Keras model
         """
+        global tf, keras, layers
+        if keras is None or layers is None:
+            try:
+                import tensorflow as _tf  # type: ignore
+                tf = _tf
+                keras = _tf.keras
+                layers = keras.layers
+            except Exception as e:  # pragma: no cover
+                raise RuntimeError("TensorFlow/Keras is required to build LightCurveTransformer but is not available.") from e
         # Get model parameters from config
         num_heads = self.config.get("num_heads", 4)
         ff_dim = self.config.get("ff_dim", 128)
@@ -552,7 +587,7 @@ class LightCurveMultiTask(LightCurveClassifier):
         y_val: Dict[str, np.ndarray],
         batch_size: int = 32,
         epochs: int = 100,
-    callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
+    callbacks: Optional[List[Any]] = None,
         class_weight: Optional[Dict[int, float]] = None
     ) -> Dict[str, Any]:
         """
