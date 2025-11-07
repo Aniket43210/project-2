@@ -10,8 +10,10 @@ from pathlib import Path
 import logging
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import numpy as np
 import time
@@ -28,6 +30,25 @@ except Exception:  # pragma: no cover
     pass
 
 app = FastAPI(title="Stellar Platform API", version="0.1.0")
+
+# --- CORS (initially permissive; tighten in production) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # TODO: restrict to your frontend domain(s)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Static Frontend (optional) ---
+_web_dir = Path(__file__).resolve().parents[2] / "web"
+if _web_dir.exists():  # mount if user created web assets
+    # Mount under /web to avoid shadowing API routes like /health, /predict/*
+    app.mount("/web", StaticFiles(directory=str(_web_dir), html=True), name="web")
+
+@app.get("/")
+async def root_index():  # pragma: no cover
+    return {"message": "Stellar API running", "static_ui": "/web/index.html", "docs": "/docs", "auth": ("required" if os.getenv("STELLAR_API_KEY") else "disabled")}
 logger = logging.getLogger("stellar_api")
 
 class _JsonFormatter(logging.Formatter):
@@ -83,21 +104,39 @@ async def request_context_middleware(request: Request, call_next):  # pragma: no
                 pass
 registry = ModelRegistry()
 
+# --- Simple API Key auth (header: x-api-key) ---
+import os
+API_KEY = os.getenv("STELLAR_API_KEY")  # if unset, auth is disabled
+
+def require_api_key(request: Request):  # pragma: no cover - simple runtime gate
+    if API_KEY is None:
+        return True
+    provided = request.headers.get("x-api-key")
+    if provided != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key; provide header 'x-api-key'.")
+    return True
+
+@app.get('/favicon.ico')
+async def favicon():  # pragma: no cover
+    return PlainTextResponse('', status_code=204)
+
 
 class SpectralPredictRequest(BaseModel):
     spectra: List[List[float]]  # Each spectrum is list of flux values
     model: Optional[str] = None  # model family name
     apply_calibration: bool = False  # optionally apply stored calibrator
+    top_k: Optional[int] = None  # if provided return top-k breakdown
 
 
 class LightCurvePredictRequest(BaseModel):
     lightcurves: List[List[float]]  # Each light curve flux array
     model: Optional[str] = None
     apply_calibration: bool = False
+    top_k: Optional[int] = None
 
 
 @app.get("/health")
-async def health():  # pragma: no cover - simple aggregation
+async def health(auth=Depends(require_api_key)):  # pragma: no cover - simple aggregation
     families = {}
     for fam_dir in registry.root.iterdir():
         if not fam_dir.is_dir():
@@ -132,13 +171,26 @@ async def health():  # pragma: no cover - simple aggregation
 
 
 @app.get("/models")
-async def list_models():
+async def list_models(auth=Depends(require_api_key)):
     out: Dict[str, Any] = {}
     for family_dir in registry.root.iterdir():
         if family_dir.is_dir():
             versions = registry.list_versions(family_dir.name)
             out[family_dir.name] = versions
     return out
+
+
+@app.get("/models/{family}/metadata")
+async def model_metadata(family: str, version: Optional[str] = None, auth=Depends(require_api_key)):
+    """Return registry metadata for a model family (optionally a specific version)."""
+    v = version or registry.get_latest_version(family)
+    if v is None:
+        raise HTTPException(status_code=404, detail=f"No versions for family {family}")
+    meta = registry.get_metadata(family, v)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    meta_slim = {k: meta[k] for k in meta if k not in {"artifact_hashes"}}
+    return meta_slim
 
 
 MAX_ITEMS = 64  # simple defensive limits
@@ -221,7 +273,7 @@ def _maybe_load_calibrator(meta: Dict[str, Any]):
 
 
 @app.post("/predict/spectral")
-async def predict_spectral(req: SpectralPredictRequest):
+async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api_key)):
     family = req.model or 'spectral_cnn'
     model, meta = _load_latest_keras_model(family)
     arr = np.array(req.spectra, dtype=float)
@@ -240,16 +292,27 @@ async def predict_spectral(req: SpectralPredictRequest):
         calib = _maybe_load_calibrator(meta)
         if calib is not None:
             probs = calib.transform(probs)
-    return {
+    result: Dict[str, Any] = {
         'model': family,
         'version': meta['version'],
         'probabilities': probs.tolist(),
         'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None)
     }
+    if req.top_k:
+        k = max(1, min(req.top_k, probs.shape[1]))
+        top_idx = np.argsort(-probs, axis=1)[:, :k]
+        top_scores = np.take_along_axis(probs, top_idx, axis=1)
+        result['top_k'] = [
+            [
+                {'class_index': int(top_idx[i, j]), 'prob': float(top_scores[i, j])}
+                for j in range(k)
+            ] for i in range(probs.shape[0])
+        ]
+    return result
 
 
 @app.post("/predict/lightcurve")
-async def predict_lightcurve(req: LightCurvePredictRequest):
+async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require_api_key)):
     family = req.model or 'lightcurve_transformer'
     model, meta = _load_latest_keras_model(family)
     arr = np.array(req.lightcurves, dtype=float)
@@ -267,18 +330,29 @@ async def predict_lightcurve(req: LightCurvePredictRequest):
         calib = _maybe_load_calibrator(meta)
         if calib is not None:
             probs = calib.transform(probs)
-    return {
+    result: Dict[str, Any] = {
         'model': family,
         'version': meta['version'],
         'probabilities': probs.tolist(),
         'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None)
     }
+    if req.top_k:
+        k = max(1, min(req.top_k, probs.shape[1]))
+        top_idx = np.argsort(-probs, axis=1)[:, :k]
+        top_scores = np.take_along_axis(probs, top_idx, axis=1)
+        result['top_k'] = [
+            [
+                {'class_index': int(top_idx[i, j]), 'prob': float(top_scores[i, j])}
+                for j in range(k)
+            ] for i in range(probs.shape[0])
+        ]
+    return result
 
 
 __all__ = ['app']
 
 @app.get('/metrics')
-async def metrics():  # pragma: no cover - textual endpoint
+async def metrics(auth=Depends(require_api_key)):  # pragma: no cover - textual endpoint
     avg_lat = (_CUM_LAT_MS / _REQ_COUNT) if _REQ_COUNT else 0.0
     # Minimal Prometheus exposition format
     body = [
