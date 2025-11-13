@@ -60,6 +60,9 @@ curl http://127.0.0.1:8000/health
 ```
 You should see `{ "status": "ok", ... }` with model registry details.
 
+Vercel / serverless note:
+This repository includes multiple FastAPI entrypoints (`app.py`, `index.py`, `server.py`) each exporting the same `app` object. Vercel scans for these filenames; you can deploy by pointing Vercel to the project root without additional config.
+
 ### API key (optional)
 You can require a simple API key via env var. If not set, auth is disabled.
 ```cmd
