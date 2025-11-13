@@ -1,0 +1,104 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.mamba/
+
+# Pip/Packaging noise
+pip-wheel-metadata/
+pip-log.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+.pyre/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Data / experiment tracking
+mlruns/
+# If you keep large local datasets at repo root
+/data/
+
+# Model artifacts (keep lightweight JSON descriptors)
+artifacts/**/*.keras
+artifacts/**/*.h5
+artifacts/**/*.hdf5
+artifacts/**/*.pkl
+artifacts/**/*.pt
+artifacts/**/*.pth
+artifacts/**/*.onnx
+artifacts/**/*.ckpt
+!artifacts/**/*.json
+
+# Array / table formats
+*.zarr
+*.zarr.zip
+*.parquet
+*.npz
+*.npy
+
+# Airflow (if used locally)
+airflow/
+logs/airflow/
+
+# Node (if ever used)
+node_modules/
