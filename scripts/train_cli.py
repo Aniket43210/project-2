@@ -16,6 +16,7 @@ from stellar_platform.data.synthetic import generate_synthetic_spectra, generate
 
 from stellar_platform.models import spectral as spectral_models
 from stellar_platform.models import lightcurve as lc_models
+from stellar_platform.models import sed as sed_models
 
 try:  # optional TF import check
     import tensorflow as tf  # type: ignore
@@ -147,6 +148,68 @@ def train_lightcurve(args):
     print(f"Registered lightcurve_transformer version {version} (dummy={use_dummy}) with calibration.")
 
 
+def _generate_synthetic_sed(n: int = 256, n_bands: int = 8, n_classes: int = 3, seed: int | None = None):
+    rng = np.random.default_rng(seed)
+    X = rng.lognormal(mean=0.0, sigma=0.5, size=(n, n_bands))
+    # Class influences a couple of band scales
+    y = rng.integers(0, n_classes, size=n)
+    for i in range(n):
+        cls = y[i]
+        X[i, cls % n_bands] *= 1.5
+        X[i, (cls+1) % n_bands] *= 0.7
+    return X.astype('float32'), y
+
+
+def train_sed(args):
+    """Train or synthesize an SED classifier and register it (joblib or dummy JSON)."""
+    X, y = _generate_synthetic_sed(n=args.samples, n_bands=args.bands, n_classes=args.classes, seed=42)
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    use_dummy = bool(getattr(args, 'force_dummy', False))
+    artifacts = {}
+    logits_or_probs = None
+    if not use_dummy:
+        try:
+            clf = sed_models.SEDClassifier({'n_estimators': 100})
+            clf.build_model(num_classes=args.classes)
+            clf.train(X, y)
+            # predict_proba for calibration
+            probs = clf.predict(X)
+            logits_or_probs = probs
+            art_path = Path(args.output_dir) / 'sed_model.pkl'
+            # Save via joblib inside SEDClassifier.save_model; we want a single path in artifacts
+            # For API simplicity, save model pipeline only under a single .pkl
+            import joblib  # type: ignore
+            joblib.dump(clf, art_path)
+            artifacts = {"model": str(art_path)}
+        except Exception:
+            use_dummy = True
+
+    if use_dummy:
+        art_path = Path(args.output_dir) / 'sed_dummy.json'
+        desc = {"type": "dummy", "classes": args.classes, "family": "sed"}
+        art_path.write_text(json.dumps(desc))
+        artifacts = {"model": str(art_path)}
+        rng = np.random.default_rng(0)
+        probs = rng.random((X.shape[0], args.classes))
+        probs /= probs.sum(axis=1, keepdims=True)
+        logits_or_probs = probs
+
+    scaler = TemperatureScaler().fit(logits_or_probs, y)
+    registry = ModelRegistry()
+    version = registry.register(
+        "sed",
+        metrics={"dummy_loss": 0.0},
+        artifacts=artifacts,
+        params={"num_classes": args.classes, "bands": args.bands, "dummy": use_dummy},
+    )
+    meta_path = registry.root / "sed" / version / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["calibrator"] = scaler.to_dict()
+    meta_path.write_text(json.dumps(meta, indent=2))
+    print(f"Registered sed version {version} (dummy={use_dummy}) with calibration.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Stellar Platform Training CLI (skeleton)")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -170,6 +233,14 @@ def main():
     lp.add_argument("--batch-size", type=int, default=32)
     lp.add_argument("--force-dummy", action="store_true", help="Force creation of dummy (non-TF) model artifact")
     lp.set_defaults(func=train_lightcurve)
+
+    sp_sed = sub.add_parser("train-sed")
+    sp_sed.add_argument("--samples", type=int, default=256)
+    sp_sed.add_argument("--bands", type=int, default=8)
+    sp_sed.add_argument("--classes", type=int, default=3)
+    sp_sed.add_argument("--output-dir", type=str, default="artifacts")
+    sp_sed.add_argument("--force-dummy", action="store_true", help="Force creation of dummy JSON artifact")
+    sp_sed.set_defaults(func=train_sed)
 
     args = parser.parse_args()
     args.func(args)

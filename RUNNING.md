@@ -82,6 +82,17 @@ curl -s -X POST http://127.0.0.1:8000/predict/lightcurve ^
 ```
 With the repo’s default registry metadata, the server will use dummy JSON artifacts and return plausible random class probabilities (optionally calibrated).
 
+SED POST:
+```cmd
+curl -s -X POST http://127.0.0.1:8000/predict/sed ^
+  -H "Content-Type: application/json" ^
+  -d "{\"features\":[[1.0,0.8,1.1,0.7,0.9,1.05]],\"top_k\":3}"
+```
+Note: Ensure a registry entry exists for the `sed` family. You can create a dummy one via:
+```cmd
+python -m scripts.train_cli train-sed --force-dummy --samples 64 --bands 6 --classes 3 --output-dir artifacts
+```
+
 ## 7) Model registry basics
 Models are tracked under `registry/<family>/<version>/metadata.json`, for example:
 - `registry/spectral_cnn/LATEST_VERSION`

@@ -72,6 +72,7 @@ def run_tests():
     spec_pred = {}
     spec_cal = {}
     lc_pred = {}
+    sed_pred = {}
     # 3. Spectral prediction (uncalibrated)
     try:
         spec_pred = _http_json("/predict/spectral", {"spectra": spectra, "apply_calibration": False})
@@ -96,12 +97,26 @@ def run_tests():
     if failures:
         raise AssertionError("; ".join(failures))
 
+    # Optional SED test if registry has 'sed'
+    try:
+        models_list = list(models.keys()) if isinstance(models, dict) else []
+        if 'sed' in models_list:
+            sed_pred = _http_json("/predict/sed", {"features": [[1.0, 0.8, 1.1, 0.7, 0.9, 1.05]], "top_k": 3})
+            if "probabilities" not in sed_pred:
+                failures.append("sed prediction missing probabilities key")
+    except Exception as e:  # pragma: no cover
+        failures.append(f"sed prediction error: {e}")
+
+    if failures:
+        raise AssertionError("; ".join(failures))
+
     return {
         "health": health,
         "models": list(models.keys()),
         "spectral_shape": (len(spec_pred["probabilities"]), len(spec_pred["probabilities"][0]) if spec_pred["probabilities"] else 0),
         "lightcurve_shape": (len(lc_pred["probabilities"]), len(lc_pred["probabilities"][0]) if lc_pred["probabilities"] else 0),
         "calibrated_flag_spectral": spec_cal.get("calibrated"),
+        "sed_shape": (len(sed_pred.get("probabilities", [])), len(sed_pred.get("probabilities", [[0]])[0]) if sed_pred.get("probabilities") else 0),
     }
 
 

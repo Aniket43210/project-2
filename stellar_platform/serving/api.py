@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import numpy as np
 import time
 import uuid
+from fastapi.security import APIKeyHeader
 
 from ..models.registry import ModelRegistry
 from ..evaluation import BaseProbCalibrator  # new import for calibration
@@ -104,15 +105,26 @@ async def request_context_middleware(request: Request, call_next):  # pragma: no
                 pass
 registry = ModelRegistry()
 
-# --- Simple API Key auth (header: x-api-key) ---
+# --- Simple API Key auth (header: x-api-key) with .env support ---
 import os
-API_KEY = os.getenv("STELLAR_API_KEY")  # if unset, auth is disabled
+try:  # load from .env if available
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:  # pragma: no cover
+    pass
 
-def require_api_key(request: Request):  # pragma: no cover - simple runtime gate
+# Read once at import; change requires process restart
+API_KEY = os.getenv("STELLAR_API_KEY")  # if unset, auth is disabled
+api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+
+def require_api_key(api_key: str | None = Depends(api_key_header)):
+    """Dependency to enforce API key when STELLAR_API_KEY is set.
+
+    Adds APIKeyHeader security scheme to OpenAPI automatically.
+    """
     if API_KEY is None:
         return True
-    provided = request.headers.get("x-api-key")
-    if provided != API_KEY:
+    if api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key; provide header 'x-api-key'.")
     return True
 
@@ -132,6 +144,12 @@ class LightCurvePredictRequest(BaseModel):
     lightcurves: List[List[float]]  # Each light curve flux array
     model: Optional[str] = None
     apply_calibration: bool = False
+    top_k: Optional[int] = None
+
+
+class SedPredictRequest(BaseModel):
+    features: List[List[float]]  # Pre-extracted SED feature vectors
+    model: Optional[str] = None  # model family name, defaults to 'sed'
     top_k: Optional[int] = None
 
 
@@ -196,7 +214,7 @@ async def model_metadata(family: str, version: Optional[str] = None, auth=Depend
 MAX_ITEMS = 64  # simple defensive limits
 MAX_LENGTH = 10000
 
-def _load_latest_keras_model(family: str):
+def _load_latest_model(family: str):
     version = registry.get_latest_version(family)
     if version is None:
         raise HTTPException(status_code=404, detail=f"No versions found for model {family}")
@@ -230,14 +248,28 @@ def _load_latest_keras_model(family: str):
                 probs /= probs.sum(axis=1, keepdims=True)
                 return probs
         model = DummyModel()
-    else:
+    elif p.suffix.lower() in {'.keras', '.h5'}:
         if tf is None:
-            raise HTTPException(status_code=500, detail="TensorFlow not available to load Keras model and artifact is not dummy JSON.")
+            raise HTTPException(status_code=500, detail="TensorFlow not available to load Keras model.")
         try:
             model = tf.keras.models.load_model(str(p))  # type: ignore
         except Exception as e:
             logger.exception("Failed to load model %s:%s from %s", family, version, p)
             raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
+    elif p.suffix.lower() == '.pkl':
+        try:
+            import joblib  # type: ignore
+            model = joblib.load(str(p))
+            # Ensure model exposes predict_proba or predict
+            if not hasattr(model, 'predict_proba') and not hasattr(model, 'predict'):
+                raise HTTPException(status_code=500, detail="Loaded SED model lacks predict/predict_proba")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Failed to load joblib model %s:%s from %s", family, version, p)
+            raise HTTPException(status_code=500, detail=f"Failed to load joblib model: {e}")
+    else:
+        raise HTTPException(status_code=415, detail=f"Unsupported artifact type: {p.suffix}")
     # verify artifact hash integrity if present
     try:
         hashes = meta.get('artifact_hashes', {})
@@ -275,7 +307,7 @@ def _maybe_load_calibrator(meta: Dict[str, Any]):
 @app.post("/predict/spectral")
 async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api_key)):
     family = req.model or 'spectral_cnn'
-    model, meta = _load_latest_keras_model(family)
+    model, meta = _load_latest_model(family)
     arr = np.array(req.spectra, dtype=float)
     if arr.ndim != 2:
         raise HTTPException(status_code=400, detail="Spectra must be 2D array")
@@ -314,7 +346,7 @@ async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api
 @app.post("/predict/lightcurve")
 async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require_api_key)):
     family = req.model or 'lightcurve_transformer'
-    model, meta = _load_latest_keras_model(family)
+    model, meta = _load_latest_model(family)
     arr = np.array(req.lightcurves, dtype=float)
     if arr.ndim != 2:
         raise HTTPException(status_code=400, detail="Light curves must be 2D array")
@@ -335,6 +367,49 @@ async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require
         'version': meta['version'],
         'probabilities': probs.tolist(),
         'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None)
+    }
+    if req.top_k:
+        k = max(1, min(req.top_k, probs.shape[1]))
+        top_idx = np.argsort(-probs, axis=1)[:, :k]
+        top_scores = np.take_along_axis(probs, top_idx, axis=1)
+        result['top_k'] = [
+            [
+                {'class_index': int(top_idx[i, j]), 'prob': float(top_scores[i, j])}
+                for j in range(k)
+            ] for i in range(probs.shape[0])
+        ]
+    return result
+
+
+@app.post("/predict/sed")
+async def predict_sed(req: SedPredictRequest, auth=Depends(require_api_key)):
+    family = req.model or 'sed'
+    model, meta = _load_latest_model(family)
+    arr = np.array(req.features, dtype=float)
+    if arr.ndim != 2:
+        raise HTTPException(status_code=400, detail="Features must be 2D array")
+    if arr.shape[0] == 0:
+        raise HTTPException(status_code=400, detail="No feature rows provided")
+    if arr.shape[0] > MAX_ITEMS:
+        raise HTTPException(status_code=400, detail=f"Batch too large (max {MAX_ITEMS})")
+    # Predict probabilities; fallback to scores if only predict() available
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(arr)  # type: ignore
+        if isinstance(probs, list):  # some sklearn APIs return list; fuse columns
+            probs = np.column_stack([pi[:, 1] if pi.shape[1] == 2 else pi.max(axis=1) for pi in probs])
+            s = probs.sum(axis=1, keepdims=True)
+            s[s == 0] = 1.0
+            probs = probs / s
+    else:
+        scores = model.predict(arr)  # type: ignore
+        scores = np.atleast_2d(scores)
+        # normalize to probabilities across last axis
+        probs = np.exp(scores - scores.max(axis=1, keepdims=True))
+        probs /= probs.sum(axis=1, keepdims=True)
+    result: Dict[str, Any] = {
+        'model': family,
+        'version': meta['version'],
+        'probabilities': probs.tolist(),
     }
     if req.top_k:
         k = max(1, min(req.top_k, probs.shape[1]))

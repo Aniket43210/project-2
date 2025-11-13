@@ -34,6 +34,8 @@ The platform consists of four main planes:
 
 ## Quick Start
 
+For a step-by-step Windows-friendly guide (venv, dependencies, API, web UI, CLI), see RUNNING.md.
+
 1. Install dependencies: `pip install -r requirements.txt`
 2. Set up environment variables in `.env`
 3. Initialize database: `python scripts/setup_db.py`
