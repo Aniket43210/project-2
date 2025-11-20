@@ -73,6 +73,8 @@ def run_tests():
     spec_cal = {}
     lc_pred = {}
     sed_pred = {}
+    spec_sets = {}
+    lc_sets = {}
     # 3. Spectral prediction (uncalibrated)
     try:
         spec_pred = _http_json("/predict/spectral", {"spectra": spectra, "apply_calibration": False})
@@ -87,6 +89,13 @@ def run_tests():
             failures.append("spectral calibrated prediction missing probabilities key")
     except Exception as e:
         failures.append(f"spectral calibrated prediction error: {e}")
+    # 4b. Spectral conformal sets
+    try:
+        spec_sets = _http_json("/predict/spectral/sets", {"spectra": spectra, "q": 0.2})
+        if "prediction_sets" not in spec_sets:
+            failures.append("spectral sets missing prediction_sets key")
+    except Exception as e:
+        failures.append(f"spectral sets error: {e}")
     # 5. Lightcurve prediction
     try:
         lc_pred = _http_json("/predict/lightcurve", {"lightcurves": lightcurves, "apply_calibration": True})
@@ -94,6 +103,13 @@ def run_tests():
             failures.append("lightcurve prediction missing probabilities key")
     except Exception as e:
         failures.append(f"lightcurve prediction error: {e}")
+    # 5b. Lightcurve conformal sets
+    try:
+        lc_sets = _http_json("/predict/lightcurve/sets", {"lightcurves": lightcurves, "q": 0.2})
+        if "prediction_sets" not in lc_sets:
+            failures.append("lightcurve sets missing prediction_sets key")
+    except Exception as e:
+        failures.append(f"lightcurve sets error: {e}")
     if failures:
         raise AssertionError("; ".join(failures))
 
@@ -116,6 +132,8 @@ def run_tests():
         "spectral_shape": (len(spec_pred["probabilities"]), len(spec_pred["probabilities"][0]) if spec_pred["probabilities"] else 0),
         "lightcurve_shape": (len(lc_pred["probabilities"]), len(lc_pred["probabilities"][0]) if lc_pred["probabilities"] else 0),
         "calibrated_flag_spectral": spec_cal.get("calibrated"),
+        "spectral_sets_len": len(spec_sets.get("prediction_sets", [])),
+        "lightcurve_sets_len": len(lc_sets.get("prediction_sets", [])),
         "sed_shape": (len(sed_pred.get("probabilities", [])), len(sed_pred.get("probabilities", [[0]])[0]) if sed_pred.get("probabilities") else 0),
     }
 

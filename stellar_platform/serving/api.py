@@ -22,6 +22,8 @@ from fastapi.security import APIKeyHeader
 
 from ..models.registry import ModelRegistry
 from ..evaluation import BaseProbCalibrator  # new import for calibration
+from ..evaluation.conformal import conformal_prediction_sets
+from ..evaluation.ensembles import average_probs, logit_average
 
 # Lazy optional imports for heavy frameworks
 tf = None  # type: ignore
@@ -138,6 +140,9 @@ class SpectralPredictRequest(BaseModel):
     model: Optional[str] = None  # model family name
     apply_calibration: bool = False  # optionally apply stored calibrator
     top_k: Optional[int] = None  # if provided return top-k breakdown
+    ensemble_models: Optional[List[str]] = None
+    ensemble_weights: Optional[List[float]] = None
+    ensemble_method: Optional[str] = None  # 'prob' or 'logit'
 
 
 class LightCurvePredictRequest(BaseModel):
@@ -145,6 +150,9 @@ class LightCurvePredictRequest(BaseModel):
     model: Optional[str] = None
     apply_calibration: bool = False
     top_k: Optional[int] = None
+    ensemble_models: Optional[List[str]] = None
+    ensemble_weights: Optional[List[float]] = None
+    ensemble_method: Optional[str] = None  # 'prob' or 'logit'
 
 
 class SedPredictRequest(BaseModel):
@@ -294,6 +302,12 @@ def _load_latest_model(family: str):
     return model, meta
 
 
+def _predict_probs_for_family(family: str, arr: np.ndarray) -> tuple[np.ndarray, dict]:
+    model, meta = _load_latest_model(family)
+    probs = model.predict(arr)
+    return probs, meta
+
+
 def _maybe_load_calibrator(meta: Dict[str, Any]):
     payload = meta.get('calibrator') if meta else None
     if not payload:
@@ -319,7 +333,31 @@ async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api
         raise HTTPException(status_code=400, detail=f"Spectrum length exceeds max {MAX_LENGTH}")
     # Expect shape (N, wavelengths)
     arr = np.expand_dims(arr, -1)  # (N, L, 1)
-    probs = model.predict(arr)
+    # Ensemble support
+    if req.ensemble_models:
+        prob_list = []
+        metas = []
+        # include primary model first by default
+        p0 = model.predict(arr)
+        prob_list.append(p0)
+        metas.append(meta)
+        for fam in req.ensemble_models:
+            try:
+                p_i, m_i = _predict_probs_for_family(fam, arr)
+                prob_list.append(p_i)
+                metas.append(m_i)
+            except HTTPException:
+                continue
+        if len(prob_list) == 1:
+            probs = p0
+        else:
+            method = (req.ensemble_method or 'prob').lower()
+            if method == 'logit':
+                probs = logit_average(prob_list)
+            else:
+                probs = average_probs(prob_list, weights=req.ensemble_weights)
+    else:
+        probs = model.predict(arr)
     if req.apply_calibration:
         calib = _maybe_load_calibrator(meta)
         if calib is not None:
@@ -341,6 +379,58 @@ async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api
             ] for i in range(probs.shape[0])
         ]
     return result
+
+
+class SpectralConformalRequest(BaseModel):
+    spectra: List[List[float]]
+    q: float  # conformal threshold
+    model: Optional[str] = None
+    apply_calibration: bool = False
+    ensemble_models: Optional[List[str]] = None
+    ensemble_weights: Optional[List[float]] = None
+    ensemble_method: Optional[str] = None  # 'prob' or 'logit'
+
+
+@app.post("/predict/spectral/sets")
+async def predict_spectral_sets(req: SpectralConformalRequest, auth=Depends(require_api_key)):
+    family = req.model or 'spectral_cnn'
+    arr = np.array(req.spectra, dtype=float)
+    if arr.ndim != 2:
+        raise HTTPException(status_code=400, detail="Spectra must be 2D array")
+    if arr.shape[0] == 0:
+        raise HTTPException(status_code=400, detail="No spectra provided")
+    if arr.shape[0] > MAX_ITEMS:
+        raise HTTPException(status_code=400, detail=f"Batch too large (max {MAX_ITEMS})")
+    if arr.shape[1] > MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Spectrum length exceeds max {MAX_LENGTH}")
+    arr = np.expand_dims(arr, -1)
+    # get probs (with optional ensemble)
+    base_model, base_meta = _load_latest_model(family)
+    if req.ensemble_models:
+        prob_list = [base_model.predict(arr)]
+        for fam in req.ensemble_models:
+            try:
+                p_i, _ = _predict_probs_for_family(fam, arr)
+                prob_list.append(p_i)
+            except HTTPException:
+                continue
+        method = (req.ensemble_method or 'prob').lower()
+        probs = logit_average(prob_list) if method == 'logit' else average_probs(prob_list, weights=req.ensemble_weights)
+    else:
+        probs = base_model.predict(arr)
+    if req.apply_calibration:
+        calib = _maybe_load_calibrator(base_meta)
+        if calib is not None:
+            probs = calib.transform(probs)
+    sets = conformal_prediction_sets(probs, req.q)
+    return {
+        'model': family,
+        'version': base_meta['version'],
+        'q': float(req.q),
+        'probabilities': probs.tolist(),
+        'prediction_sets': [list(map(int, s.tolist())) for s in sets],
+        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(base_meta) is not None)
+    }
 
 
 @app.post("/predict/lightcurve")
@@ -357,7 +447,30 @@ async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require
     if arr.shape[1] > MAX_LENGTH:
         raise HTTPException(status_code=400, detail=f"Light curve length exceeds max {MAX_LENGTH}")
     arr = np.expand_dims(arr, -1)
-    probs = model.predict(arr)
+    # Ensemble support
+    if req.ensemble_models:
+        prob_list = []
+        metas = []
+        p0 = model.predict(arr)
+        prob_list.append(p0)
+        metas.append(meta)
+        for fam in req.ensemble_models:
+            try:
+                p_i, m_i = _predict_probs_for_family(fam, arr)
+                prob_list.append(p_i)
+                metas.append(m_i)
+            except HTTPException:
+                continue
+        if len(prob_list) == 1:
+            probs = p0
+        else:
+            method = (req.ensemble_method or 'prob').lower()
+            if method == 'logit':
+                probs = logit_average(prob_list)
+            else:
+                probs = average_probs(prob_list, weights=req.ensemble_weights)
+    else:
+        probs = model.predict(arr)
     if req.apply_calibration:
         calib = _maybe_load_calibrator(meta)
         if calib is not None:
@@ -379,6 +492,57 @@ async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require
             ] for i in range(probs.shape[0])
         ]
     return result
+
+
+class LightCurveConformalRequest(BaseModel):
+    lightcurves: List[List[float]]
+    q: float
+    model: Optional[str] = None
+    apply_calibration: bool = False
+    ensemble_models: Optional[List[str]] = None
+    ensemble_weights: Optional[List[float]] = None
+    ensemble_method: Optional[str] = None
+
+
+@app.post("/predict/lightcurve/sets")
+async def predict_lightcurve_sets(req: LightCurveConformalRequest, auth=Depends(require_api_key)):
+    family = req.model or 'lightcurve_transformer'
+    arr = np.array(req.lightcurves, dtype=float)
+    if arr.ndim != 2:
+        raise HTTPException(status_code=400, detail="Light curves must be 2D array")
+    if arr.shape[0] == 0:
+        raise HTTPException(status_code=400, detail="No light curves provided")
+    if arr.shape[0] > MAX_ITEMS:
+        raise HTTPException(status_code=400, detail=f"Batch too large (max {MAX_ITEMS})")
+    if arr.shape[1] > MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Light curve length exceeds max {MAX_LENGTH}")
+    arr = np.expand_dims(arr, -1)
+    base_model, base_meta = _load_latest_model(family)
+    if req.ensemble_models:
+        prob_list = [base_model.predict(arr)]
+        for fam in req.ensemble_models:
+            try:
+                p_i, _ = _predict_probs_for_family(fam, arr)
+                prob_list.append(p_i)
+            except HTTPException:
+                continue
+        method = (req.ensemble_method or 'prob').lower()
+        probs = logit_average(prob_list) if method == 'logit' else average_probs(prob_list, weights=req.ensemble_weights)
+    else:
+        probs = base_model.predict(arr)
+    if req.apply_calibration:
+        calib = _maybe_load_calibrator(base_meta)
+        if calib is not None:
+            probs = calib.transform(probs)
+    sets = conformal_prediction_sets(probs, req.q)
+    return {
+        'model': family,
+        'version': base_meta['version'],
+        'q': float(req.q),
+        'probabilities': probs.tolist(),
+        'prediction_sets': [list(map(int, s.tolist())) for s in sets],
+        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(base_meta) is not None)
+    }
 
 
 @app.post("/predict/sed")

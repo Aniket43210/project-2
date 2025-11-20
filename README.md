@@ -234,3 +234,72 @@ reloaded = BaseProbCalibrator.from_dict(payload)
 - Add contrastive pretraining on simulated/observed pairs
 - Expand to imaging data in v2.0
 
+## Phase 3 Starters (New)
+
+Initial utilities are available to start Phase 3 exploration without heavy dependencies:
+
+- Conformal prediction (split conformal): build prediction sets with coverage guarantees
+- Simple ensembling: average probabilities or logit-space averaging across models
+
+### Conformal Prediction Usage
+
+```python
+import numpy as np
+from stellar_platform.evaluation import (
+   compute_conformal_threshold,
+   conformal_prediction_sets,
+   empirical_coverage,
+)
+
+# calibration data
+q = compute_conformal_threshold(y_cal, probs_cal, alpha=0.1)
+# prediction sets for new data
+sets = conformal_prediction_sets(probs_test, q)
+cov = empirical_coverage(y_test, probs_test, q)
+print('Empirical coverage:', cov)
+```
+
+### Ensembling Usage
+
+```python
+from stellar_platform.evaluation import average_probs, logit_average
+
+p_ens = average_probs([probs_model_a, probs_model_b], weights=[0.6, 0.4])
+p_ens_logit = logit_average([probs_model_a, probs_model_b])
+```
+
+These utilities are dependency-light and integrate with existing evaluation flows.
+
+## API Additions (Phase 3)
+
+- `POST /predict/spectral` now supports ensembling:
+   - `ensemble_models`: list of model families to include with the primary model
+   - `ensemble_weights`: optional weights aligned with models order
+   - `ensemble_method`: `prob` (default) or `logit`
+- `POST /predict/lightcurve` mirrors the same ensembling options.
+- `POST /predict/spectral/sets`: returns conformal prediction sets given a threshold `q`.
+- `POST /predict/lightcurve/sets`: same for lightcurves.
+
+Example (spectral sets):
+
+```bash
+curl -X POST http://localhost:8000/predict/spectral/sets \
+   -H "Content-Type: application/json" \
+   -d '{"spectra": [[0.1,0.2,0.3,0.4,0.5]], "q": 0.2, "ensemble_models": ["lightcurve_transformer"], "ensemble_method": "logit"}'
+```
+
+## CLI Additions (Phase 3)
+
+- Ensembling in `evaluate_cli.py`:
+   - `--families`: comma-separated extra families to ensemble with
+   - `--versions`: optional comma-separated versions matching families
+   - `--ensemble-method`: `prob` or `logit`
+- Conformal summary in reports:
+   - `--conformal-alpha 0.1` computes `q_hat` on a calibration split and reports empirical coverage.
+
+Example:
+
+```cmd
+python scripts\evaluate_cli.py spectral_cnn --families spectral_cnn,lightcurve_transformer --ensemble-method logit --conformal-alpha 0.1
+```
+
