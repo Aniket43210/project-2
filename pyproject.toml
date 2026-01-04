@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stellar_platform"
+version = "0.1.0"
+description = "Multi-modal stellar analysis platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "numpy==1.26.4",
+    "scipy>=1.11.0,<1.14.0",
+    "pandas==2.2.2",
+    "scikit-learn==1.4.2",
+    "astropy>=5.0.0",
+    "astroquery>=0.4.0",
+    "lightkurve>=2.0.0",
+    "specutils>=1.6.0",
+    "tensorflow>=2.15.0,<2.21.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "fastapi>=0.78.0",
+    "uvicorn>=0.18.0",
+    "pydantic>=1.9.0",
+    "python-dotenv>=0.19.0",
+    "pytest>=6.2.0",
+    "pytest-cov>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.2.0",
+    "pytest-cov>=3.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "mypy>=0.950",
+]
+mlflow = ["mlflow>=1.24.0"]
+airflow = ["apache-airflow>=2.4.0"]
+orchestration = ["prefect>=2.0.0"]
+
+[tool.setuptools]
+packages = ["stellar_platform"]
+
+[tool.setuptools.package-data]
+stellar_platform = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --cov=stellar_platform --cov-report=term-missing"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

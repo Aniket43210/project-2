@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import numpy as np
 import time
 import uuid
+import os
 from fastapi.security import APIKeyHeader
 
 from ..models.registry import ModelRegistry
@@ -108,7 +109,6 @@ async def request_context_middleware(request: Request, call_next):  # pragma: no
 registry = ModelRegistry()
 
 # --- Simple API Key auth (header: x-api-key) with .env support ---
-import os
 try:  # load from .env if available
     from dotenv import load_dotenv  # type: ignore
     load_dotenv()

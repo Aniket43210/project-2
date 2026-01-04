@@ -1,0 +1,24 @@
+{
+  "name": "sed",
+  "version": "1767553631-f856bc",
+  "artifacts": {
+    "model": "artifacts\\sed_dummy.json"
+  },
+  "artifact_hashes": {
+    "model": "9907a5323f3c1c58db79c3a25d56a4378ecd3f3ee61fb813fc6407896f480c7e"
+  },
+  "metrics": {
+    "dummy_loss": 0.0
+  },
+  "tags": {},
+  "params": {
+    "num_classes": 3,
+    "bands": 8,
+    "dummy": true
+  },
+  "registered_at": "2026-01-04T19:07:11Z",
+  "calibrator": {
+    "type": "TemperatureScaler",
+    "temperature": 5.0
+  }
+}

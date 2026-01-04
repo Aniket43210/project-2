@@ -24,7 +24,10 @@ except Exception:  # pragma: no cover
     tf = None  # type: ignore
 from stellar_platform.models.registry import ModelRegistry
 from stellar_platform.evaluation import TemperatureScaler
-from scripts.evaluate_cli import generate_real_metrics  # reuse evaluation logic
+from pathlib import Path as PathlibPath
+import sys
+sys.path.insert(0, str(PathlibPath(__file__).parent))
+from evaluate_cli import generate_real_metrics  # reuse evaluation logic
 
 
 def _dummy_data(n=128, length=256, n_classes=3):
@@ -247,4 +250,6 @@ def main():
 
 
 if __name__ == "__main__":  # pragma: no cover
+    import sys
+    sys.path.insert(0, str(PathlibPath(__file__).parent))
     main()
