@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from prefect import flow, task, get_run_logger
-    from prefect.task_runs import wait_for_task_run
+    from prefect import flow, task, get_run_logger  # type: ignore
+    from prefect.task_runs import wait_for_task_run  # type: ignore
     PREFECT_AVAILABLE = True
 except ImportError:
     PREFECT_AVAILABLE = False

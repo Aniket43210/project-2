@@ -14,9 +14,15 @@ from pathlib import Path
 
 try:
     from airflow import DAG
-    from airflow.operators.python import PythonOperator
-    from airflow.operators.bash import BashOperator
     from airflow.utils.dates import days_ago
+    # Operators - import based on available Airflow version
+    try:
+        from airflow.operators.python import PythonOperator  # type: ignore
+        from airflow.operators.bash import BashOperator  # type: ignore
+    except ImportError:
+        # Fallback for newer Airflow versions
+        from airflow.providers.standard.operators.python import PythonOperator  # type: ignore
+        from airflow.providers.standard.operators.bash import BashOperator  # type: ignore
     AIRFLOW_AVAILABLE = True
 except ImportError:
     AIRFLOW_AVAILABLE = False
@@ -99,7 +105,7 @@ def preprocess_spectra(**context):
 def preprocess_lightcurves(**context):
     """Preprocess ingested light curves."""
     from stellar_platform.data.preprocessing.lightcurve import (
-        load_lightcurve, normalize_lightcurve, detrend_lightcurve
+        load_lightcurve, detrend_lightcurve
     )
     
     # Placeholder: load & preprocess
