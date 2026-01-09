@@ -20,11 +20,22 @@ import time
 import uuid
 import os
 from fastapi.security import APIKeyHeader
+from astropy.timeseries import TimeSeries
+from astropy.time import Time
 
 from ..models.registry import ModelRegistry
 from ..evaluation import BaseProbCalibrator  # new import for calibration
 from ..evaluation.conformal import conformal_prediction_sets
 from ..evaluation.ensembles import average_probs, logit_average
+
+# Phase 1 imports: data ingestion, preprocessing, and loaders
+from ..data.ingestion.sdss import SDSSConnector
+from ..data.ingestion.kepler_tess import KeplerTESSConnector
+from ..data.ingestion.sync_state import get_sync_manager
+from ..data.preprocessing import spectral as spectral_preproc
+from ..data.preprocessing import lightcurve as lightcurve_preproc
+from ..data.loaders import SpectralDataLoader, LightCurveDataLoader
+from ..data.schemas import Spectrum, LightCurve
 
 # Lazy optional imports for heavy frameworks
 tf = None  # type: ignore
@@ -137,8 +148,11 @@ async def favicon():  # pragma: no cover
 
 class SpectralPredictRequest(BaseModel):
     spectra: List[List[float]]  # Each spectrum is list of flux values
+    wavelengths: Optional[List[float]] = None  # Optional wavelength grid (shared across all spectra)
     model: Optional[str] = None  # model family name
     apply_calibration: bool = False  # optionally apply stored calibrator
+    apply_preprocessing: bool = True  # apply Phase 1 preprocessing pipeline
+    continuum_method: str = 'spline'  # 'spline', 'polynomial', 'median'
     top_k: Optional[int] = None  # if provided return top-k breakdown
     ensemble_models: Optional[List[str]] = None
     ensemble_weights: Optional[List[float]] = None
@@ -147,8 +161,13 @@ class SpectralPredictRequest(BaseModel):
 
 class LightCurvePredictRequest(BaseModel):
     lightcurves: List[List[float]]  # Each light curve flux array
+    times: Optional[List[List[float]]] = None  # Optional time arrays for each lightcurve
     model: Optional[str] = None
     apply_calibration: bool = False
+    apply_preprocessing: bool = True  # apply Phase 1 preprocessing pipeline
+    detrend: bool = True
+    detrend_method: str = 'polynomial'  # 'polynomial', 'spline', 'savgol'
+    remove_outliers: bool = True
     top_k: Optional[int] = None
     ensemble_models: Optional[List[str]] = None
     ensemble_weights: Optional[List[float]] = None
@@ -159,6 +178,52 @@ class SedPredictRequest(BaseModel):
     features: List[List[float]]  # Pre-extracted SED feature vectors
     model: Optional[str] = None  # model family name, defaults to 'sed'
     top_k: Optional[int] = None
+
+
+# --- Phase 1: Data Pipeline Request Models ---
+
+class SyncSpectraRequest(BaseModel):
+    max_records: int = 100
+    min_sn: float = 5.0
+    batch_size: int = 100
+    resume: bool = True
+
+
+class SyncLightCurvesRequest(BaseModel):
+    mission: str = 'TESS'  # 'TESS' or 'Kepler'
+    max_records: int = 100
+    resume: bool = True
+
+
+class PreprocessSpectralRequest(BaseModel):
+    wavelength: List[float]
+    flux: List[float]
+    uncertainty: Optional[List[float]] = None
+    apply_continuum_normalization: bool = True
+    continuum_method: str = 'spline'  # 'spline', 'polynomial', 'median'
+    convert_air_to_vacuum: bool = False
+    mask_telluric: bool = False
+    correct_redshift: Optional[float] = None  # if provided, apply redshift correction
+
+
+class PreprocessLightCurveRequest(BaseModel):
+    time: List[float]
+    flux: List[float]
+    uncertainty: Optional[List[float]] = None
+    detrend: bool = True
+    detrend_method: str = 'polynomial'  # 'polynomial', 'spline', 'savgol'
+    remove_outliers: bool = True
+    outlier_sigma: float = 5.0
+    fill_gaps: bool = False
+    interpolation_method: str = 'linear'  # 'linear', 'cubic', 'spline'
+    find_period: bool = False
+
+
+class DataLoaderRequest(BaseModel):
+    data_type: str  # 'spectral' or 'lightcurve'
+    num_samples: int = 16
+    apply_augmentation: bool = False
+    batch_size: int = 16
 
 
 @app.get("/health")
@@ -331,6 +396,46 @@ async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api
         raise HTTPException(status_code=400, detail=f"Batch too large (max {MAX_ITEMS})")
     if arr.shape[1] > MAX_LENGTH:
         raise HTTPException(status_code=400, detail=f"Spectrum length exceeds max {MAX_LENGTH}")
+    
+    # Phase 1: Apply preprocessing if requested
+    if req.apply_preprocessing and req.wavelengths:
+        wavelengths = np.array(req.wavelengths, dtype=float)
+        if len(wavelengths) != arr.shape[1]:
+            raise HTTPException(status_code=400, detail="Wavelength array must match spectrum length")
+        
+        # Apply preprocessing to each spectrum
+        preprocessed_spectra = []
+        for i in range(arr.shape[0]):
+            try:
+                # Create Spectrum1D if available
+                if spectral_preproc.Spectrum1D is not None and spectral_preproc.u is not None:
+                    spectrum = spectral_preproc.Spectrum1D(
+                        spectral_axis=wavelengths * spectral_preproc.u.Angstrom,
+                        flux=arr[i] * spectral_preproc.u.Jy
+                    )
+                else:
+                    spectrum = {'wavelength': wavelengths, 'flux': arr[i]}
+                
+                # Apply continuum normalization
+                spectrum = spectral_preproc.normalize_continuum(
+                    spectrum, 
+                    method=req.continuum_method,
+                    sigma_clip=3.0
+                )
+                
+                # Extract flux
+                if isinstance(spectrum, dict):
+                    preprocessed_flux = spectrum['flux']
+                else:
+                    preprocessed_flux = spectrum.flux.value
+                
+                preprocessed_spectra.append(preprocessed_flux)
+            except Exception as e:
+                logger.warning(f"Preprocessing failed for spectrum {i}: {e}, using original")
+                preprocessed_spectra.append(arr[i])
+        
+        arr = np.array(preprocessed_spectra, dtype=float)
+    
     # Expect shape (N, wavelengths)
     arr = np.expand_dims(arr, -1)  # (N, L, 1)
     # Ensemble support
@@ -366,7 +471,8 @@ async def predict_spectral(req: SpectralPredictRequest, auth=Depends(require_api
         'model': family,
         'version': meta['version'],
         'probabilities': probs.tolist(),
-        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None)
+        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None),
+        'preprocessing_applied': req.apply_preprocessing and req.wavelengths is not None
     }
     if req.top_k:
         k = max(1, min(req.top_k, probs.shape[1]))
@@ -446,6 +552,54 @@ async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require
         raise HTTPException(status_code=400, detail=f"Batch too large (max {MAX_ITEMS})")
     if arr.shape[1] > MAX_LENGTH:
         raise HTTPException(status_code=400, detail=f"Light curve length exceeds max {MAX_LENGTH}")
+    
+    # Phase 1: Apply preprocessing if requested
+    if req.apply_preprocessing and req.times:
+        if len(req.times) != arr.shape[0]:
+            raise HTTPException(status_code=400, detail="Must provide time array for each lightcurve")
+        
+        # Apply preprocessing to each lightcurve
+        preprocessed_lcs = []
+        for i in range(arr.shape[0]):
+            try:
+                time_arr = np.array(req.times[i], dtype=float)
+                flux_arr = arr[i][:len(time_arr)]  # Trim to match time length
+                
+                # Create TimeSeries
+                ts_data = {
+                    'time': Time(time_arr, format='jd'),
+                    'flux': flux_arr
+                }
+                time_series = TimeSeries(ts_data)
+                
+                # Apply preprocessing steps
+                if req.remove_outliers:
+                    time_series = lightcurve_preproc.remove_outliers(time_series, sigma=5.0)
+                
+                if req.detrend:
+                    time_series = lightcurve_preproc.detrend_lightcurve(
+                        time_series,
+                        method=req.detrend_method,
+                        robust=True
+                    )
+                
+                # Extract flux and pad/trim to original length
+                processed_flux = time_series['flux'].value
+                if len(processed_flux) < arr.shape[1]:
+                    # Pad with zeros
+                    padded_flux = np.zeros(arr.shape[1])
+                    padded_flux[:len(processed_flux)] = processed_flux
+                    preprocessed_lcs.append(padded_flux)
+                else:
+                    # Trim to original length
+                    preprocessed_lcs.append(processed_flux[:arr.shape[1]])
+                    
+            except Exception as e:
+                logger.warning(f"Preprocessing failed for lightcurve {i}: {e}, using original")
+                preprocessed_lcs.append(arr[i])
+        
+        arr = np.array(preprocessed_lcs, dtype=float)
+    
     arr = np.expand_dims(arr, -1)
     # Ensemble support
     if req.ensemble_models:
@@ -479,7 +633,8 @@ async def predict_lightcurve(req: LightCurvePredictRequest, auth=Depends(require
         'model': family,
         'version': meta['version'],
         'probabilities': probs.tolist(),
-        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None)
+        'calibrated': bool(req.apply_calibration and _maybe_load_calibrator(meta) is not None),
+        'preprocessing_applied': req.apply_preprocessing and req.times is not None
     }
     if req.top_k:
         k = max(1, min(req.top_k, probs.shape[1]))
@@ -603,3 +758,388 @@ async def metrics(auth=Depends(require_api_key)):  # pragma: no cover - textual 
         f"stellar_request_latency_ms_avg {avg_lat:.4f}",
     ]
     return PlainTextResponse("\n".join(body) + "\n")
+
+
+# ========================================
+# Phase 1: Data Pipeline Endpoints
+# ========================================
+
+@app.post("/data/sync/spectra")
+async def sync_spectra(req: SyncSpectraRequest, auth=Depends(require_api_key)):
+    """
+    Trigger incremental sync of SDSS spectra.
+    
+    Returns:
+        Sync status with records processed and timestamp
+    """
+    try:
+        connector = SDSSConnector()
+        sync_mgr = get_sync_manager()
+        
+        # Run sync
+        result = connector.incremental_sync_spectra(
+            max_records=req.max_records,
+            min_sn=req.min_sn,
+            batch_size=req.batch_size,
+            resume=req.resume
+        )
+        
+        # Get current state
+        state = sync_mgr.load_state('SDSS')
+        
+        return {
+            'status': 'success',
+            'survey': 'sdss',
+            'records_processed': result.get('records_processed', 0),
+            'records_saved': result.get('records_saved', 0),
+            'errors': result.get('errors', 0),
+            'last_sync': state.last_sync_timestamp.isoformat() if state and state.last_sync_timestamp else None,
+            'total_records': state.records_processed if state else 0
+        }
+    except Exception as e:
+        logger.exception("Failed to sync SDSS spectra")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
+
+@app.post("/data/sync/lightcurves")
+async def sync_lightcurves(req: SyncLightCurvesRequest, auth=Depends(require_api_key)):
+    """
+    Trigger incremental sync of TESS/Kepler lightcurves.
+    
+    Returns:
+        Sync status with records processed and timestamp
+    """
+    try:
+        connector = KeplerTESSConnector()
+        sync_mgr = get_sync_manager()
+        
+        # Run sync
+        result = connector.incremental_sync_lightcurves(
+            mission=req.mission,
+            max_records=req.max_records,
+            resume=req.resume
+        )
+        
+        # Get current state
+        survey_key = req.mission.upper()
+        state = sync_mgr.load_state(survey_key)
+        
+        return {
+            'status': 'success',
+            'survey': survey_key.lower(),
+            'records_processed': result.get('records_processed', 0),
+            'records_saved': result.get('records_saved', 0),
+            'errors': result.get('errors', 0),
+            'last_sync': state.last_sync_timestamp.isoformat() if state and state.last_sync_timestamp else None,
+            'total_records': state.records_processed if state else 0
+        }
+    except Exception as e:
+        logger.exception(f"Failed to sync {req.mission} lightcurves")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
+
+@app.post("/data/preprocess/spectral")
+async def preprocess_spectral(req: PreprocessSpectralRequest, auth=Depends(require_api_key)):
+    """
+    Apply Phase 1 spectral preprocessing pipeline.
+    
+    Returns:
+        Preprocessed spectrum with wavelength, flux, and optional uncertainty
+    """
+    try:
+        wavelength = np.array(req.wavelength, dtype=float)
+        flux = np.array(req.flux, dtype=float)
+        uncertainty = np.array(req.uncertainty, dtype=float) if req.uncertainty else None
+        
+        if wavelength.shape != flux.shape:
+            raise HTTPException(status_code=400, detail="Wavelength and flux arrays must have same length")
+        
+        # Create Spectrum1D object if specutils available
+        if spectral_preproc.Spectrum1D is not None and spectral_preproc.u is not None:
+            spectrum = spectral_preproc.Spectrum1D(
+                spectral_axis=wavelength * spectral_preproc.u.Angstrom,
+                flux=flux * spectral_preproc.u.Jy,
+                uncertainty=(spectral_preproc.StdDevUncertainty(uncertainty) if uncertainty is not None else None)
+            )
+        else:
+            # Fallback to dict representation
+            spectrum = {
+                'wavelength': wavelength,
+                'flux': flux,
+                'uncertainty': uncertainty
+            }
+        
+        # Apply preprocessing steps
+        if req.convert_air_to_vacuum:
+            if isinstance(spectrum, dict):
+                spectrum['wavelength'] = spectral_preproc.convert_air_to_vacuum(spectrum['wavelength'])
+            else:
+                wavelength = spectral_preproc.convert_air_to_vacuum(wavelength)
+                spectrum = spectral_preproc.Spectrum1D(
+                    spectral_axis=wavelength * spectral_preproc.u.Angstrom,
+                    flux=spectrum.flux,
+                    uncertainty=spectrum.uncertainty
+                )
+        
+        if req.correct_redshift is not None:
+            spectrum = spectral_preproc.correct_redshift(spectrum, req.correct_redshift)
+        
+        if req.mask_telluric:
+            # Get current wavelength from spectrum
+            if isinstance(spectrum, dict):
+                current_wavelength = spectrum['wavelength']
+            else:
+                current_wavelength = spectrum.spectral_axis.value
+            
+            mask = spectral_preproc.mask_telluric_regions(current_wavelength)
+            
+            if isinstance(spectrum, dict):
+                spectrum['flux'][~mask] = np.nan
+            else:
+                flux_masked = spectrum.flux.value.copy()
+                flux_masked[~mask] = np.nan
+                spectrum = spectral_preproc.Spectrum1D(
+                    spectral_axis=spectrum.spectral_axis,
+                    flux=flux_masked * spectrum.flux.unit,
+                    uncertainty=spectrum.uncertainty
+                )
+        
+        if req.apply_continuum_normalization:
+            spectrum = spectral_preproc.normalize_continuum(
+                spectrum,
+                method=req.continuum_method
+            )
+        
+        # Extract arrays for response
+        if isinstance(spectrum, dict):
+            result_wavelength = spectrum['wavelength'].tolist()
+            result_flux = spectrum['flux'].tolist()
+            result_uncertainty = spectrum['uncertainty'].tolist() if spectrum['uncertainty'] is not None else None
+        else:
+            result_wavelength = spectrum.spectral_axis.value.tolist()
+            result_flux = spectrum.flux.value.tolist()
+            result_uncertainty = (spectrum.uncertainty.array.tolist() 
+                                  if spectrum.uncertainty is not None else None)
+        
+        return {
+            'status': 'success',
+            'wavelength': result_wavelength,
+            'flux': result_flux,
+            'uncertainty': result_uncertainty,
+            'preprocessing_applied': {
+                'continuum_normalization': req.apply_continuum_normalization,
+                'air_to_vacuum': req.convert_air_to_vacuum,
+                'telluric_masking': req.mask_telluric,
+                'redshift_correction': req.correct_redshift is not None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to preprocess spectrum")
+        raise HTTPException(status_code=500, detail=f"Preprocessing failed: {str(e)}")
+
+
+@app.post("/data/preprocess/lightcurve")
+async def preprocess_lightcurve(req: PreprocessLightCurveRequest, auth=Depends(require_api_key)):
+    """
+    Apply Phase 1 lightcurve preprocessing pipeline.
+    
+    Returns:
+        Preprocessed lightcurve with time, flux, optional uncertainty, and period if requested
+    """
+    try:
+        time = np.array(req.time, dtype=float)
+        flux = np.array(req.flux, dtype=float)
+        uncertainty = np.array(req.uncertainty, dtype=float) if req.uncertainty else None
+        
+        if time.shape != flux.shape:
+            raise HTTPException(status_code=400, detail="Time and flux arrays must have same length")
+        
+        # Create TimeSeries object with explicit units
+        from astropy import units as u
+        ts_data = {
+            'time': Time(time, format='jd'),
+            'flux': flux * u.dimensionless_unscaled
+        }
+        if uncertainty is not None:
+            ts_data['flux_err'] = uncertainty * u.dimensionless_unscaled
+        
+        time_series = TimeSeries(ts_data)
+        
+        # Apply preprocessing steps
+        if req.remove_outliers:
+            time_series = lightcurve_preproc.remove_outliers(
+                time_series,
+                sigma=req.outlier_sigma
+            )
+        
+        if req.detrend:
+            time_series = lightcurve_preproc.detrend_lightcurve(
+                time_series,
+                method=req.detrend_method,
+                robust=True
+            )
+        
+        if req.fill_gaps:
+            time_series = lightcurve_preproc.fill_gaps(
+                time_series,
+                method=req.interpolation_method
+            )
+        
+        # Calculate period if requested
+        period_info = None
+        if req.find_period:
+            try:
+                periods = lightcurve_preproc.find_periods(
+                    time_series,
+                    min_period=0.1,
+                    max_period=100.0,
+                    n_peaks=3
+                )
+                period_info = {
+                    'best_period': float(periods[0]['period']) if periods else None,
+                    'power': float(periods[0]['power']) if periods else None,
+                    'fap': float(periods[0]['fap']) if periods else None,
+                    'top_periods': [
+                        {
+                            'period': float(p['period']),
+                            'power': float(p['power']),
+                            'fap': float(p['fap'])
+                        } for p in periods[:3]
+                    ]
+                }
+            except Exception as e:
+                logger.warning(f"Period finding failed: {e}")
+                period_info = {'error': str(e)}
+        
+        # Extract arrays for response
+        result_time = time_series.time.jd.tolist()
+        flux_col = time_series['flux']
+        result_flux = (flux_col.value.tolist() if hasattr(flux_col, 'value') 
+                       else np.array(flux_col).tolist())
+        result_uncertainty = None
+        if 'flux_err' in time_series.colnames:
+            flux_err_col = time_series['flux_err']
+            result_uncertainty = (flux_err_col.value.tolist() if hasattr(flux_err_col, 'value') 
+                                  else np.array(flux_err_col).tolist())
+        
+        return {
+            'status': 'success',
+            'time': result_time,
+            'flux': result_flux,
+            'uncertainty': result_uncertainty,
+            'period': period_info,
+            'preprocessing_applied': {
+                'detrending': req.detrend,
+                'outlier_removal': req.remove_outliers,
+                'gap_filling': req.fill_gaps,
+                'period_finding': req.find_period
+            },
+            'length': len(result_time)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to preprocess lightcurve")
+        raise HTTPException(status_code=500, detail=f"Preprocessing failed: {str(e)}")
+
+
+@app.post("/data/loaders/batch")
+async def get_training_batch(req: DataLoaderRequest, auth=Depends(require_api_key)):
+    """
+    Generate a training batch using Phase 1 data loaders.
+    
+    Returns:
+        Sample batch with metadata about augmentation and shapes
+    """
+    try:
+        if req.data_type == 'spectral':
+            # Create synthetic spectral data for demo
+            wavelengths = np.linspace(3500, 9000, 500)
+            spectra_array = []
+            labels_list = []
+            
+            for i in range(req.num_samples):
+                # Generate synthetic spectrum
+                flux = np.random.randn(500) * 0.1 + 1.0
+                spectra_array.append(flux)
+                labels_list.append(i % 3)
+            
+            # Create loader with numpy arrays
+            loader = SpectralDataLoader(
+                spectra=np.array(spectra_array),
+                labels=np.array(labels_list),
+                batch_size=req.batch_size,
+                normalize=True,
+                augment=req.apply_augmentation
+            )
+            
+            # Get first batch
+            batch_spectra, batch_labels = next(iter(loader))
+            
+            return {
+                'status': 'success',
+                'data_type': 'spectral',
+                'batch_shape': list(batch_spectra.shape),
+                'labels_shape': list(batch_labels.shape),
+                'num_samples': req.num_samples,
+                'augmentation_applied': req.apply_augmentation,
+                'sample_flux_range': [float(batch_spectra.min()), float(batch_spectra.max())],
+                'sample_labels': batch_labels.tolist()
+            }
+            
+        elif req.data_type == 'lightcurve':
+            # Create synthetic lightcurve data for demo
+            lightcurves_array = []
+            labels_list = []
+            max_len = 200
+            
+            for i in range(req.num_samples):
+                # Generate synthetic lightcurve
+                lc_len = np.random.randint(50, max_len)
+                flux = np.random.randn(lc_len) * 0.1 + 1.0
+                lightcurves_array.append(flux)
+                labels_list.append(i % 3)
+            
+            # Pad to same length
+            padded_lcs = []
+            for lc in lightcurves_array:
+                padded = np.zeros(max_len)
+                padded[:len(lc)] = lc
+                padded_lcs.append(padded)
+            
+            # Create loader with numpy arrays
+            loader = LightCurveDataLoader(
+                lightcurves=np.array(padded_lcs),
+                labels=np.array(labels_list),
+                batch_size=req.batch_size,
+                max_length=max_len,
+                augment=req.apply_augmentation
+            )
+            
+            # Get first batch
+            batch_lcs, batch_labels, batch_mask = next(iter(loader))
+            
+            valid_timesteps = batch_mask.sum(axis=1).mean()
+            
+            return {
+                'status': 'success',
+                'data_type': 'lightcurve',
+                'batch_shape': list(batch_lcs.shape),
+                'labels_shape': list(batch_labels.shape),
+                'mask_shape': list(batch_mask.shape),
+                'num_samples': req.num_samples,
+                'augmentation_applied': req.apply_augmentation,
+                'avg_valid_timesteps': float(valid_timesteps),
+                'sample_flux_range': [float(batch_lcs.min()), float(batch_lcs.max())],
+                'sample_labels': batch_labels.tolist()
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid data_type: {req.data_type}. Must be 'spectral' or 'lightcurve'")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to generate training batch")
+        raise HTTPException(status_code=500, detail=f"Batch generation failed: {str(e)}")

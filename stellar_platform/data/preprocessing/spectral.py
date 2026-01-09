@@ -11,7 +11,7 @@ This module provides functions for preprocessing astronomical spectra including:
 
 import numpy as np
 import pandas as pd
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 import logging
 
 # Optional heavy imports guarded for environments without astronomy stack
@@ -117,7 +117,178 @@ def resample_to_grid(spectrum, grid: np.ndarray):
         return spectrum
 
 
-def normalize_continuum(spectrum, method: str = 'spline'):
+def normalize_continuum(spectrum, method: str = 'spline', order: int = 3, sigma_clip: float = 3.0):
+    """
+    Normalize spectrum by continuum.
+
+    Args:
+        spectrum: Input Spectrum1D object
+        method: Method for continuum fitting ('spline', 'polynomial', 'median')
+        order: Order for polynomial/spline fitting
+        sigma_clip: Sigma threshold for outlier rejection
+
+    Returns:
+        Continuum-normalized Spectrum1D object
+    """
+    from scipy.interpolate import UnivariateSpline
+    from scipy.signal import medfilt
+    
+    flux = spectrum.flux.value
+    wavelength = spectrum.spectral_axis.value
+    
+    # Sigma-clip outliers
+    flux_median = np.median(flux)
+    flux_std = np.std(flux)
+    mask = np.abs(flux - flux_median) < (sigma_clip * flux_std)
+    
+    if method == 'spline':
+        # Fit spline to continuum
+        try:
+            spline = UnivariateSpline(
+                wavelength[mask],
+                flux[mask],
+                k=min(order, len(wavelength[mask]) - 1),
+                s=len(wavelength) * 0.01  # Smoothing factor
+            )
+            continuum = spline(wavelength)
+        except Exception:
+            # Fallback to polynomial
+            continuum = np.polyval(np.polyfit(wavelength[mask], flux[mask], order), wavelength)
+    
+    elif method == 'polynomial':
+        coeffs = np.polyfit(wavelength[mask], flux[mask], order)
+        continuum = np.polyval(coeffs, wavelength)
+    
+    elif method == 'median':
+        # Running median filter
+        window = max(3, len(flux) // 50)
+        if window % 2 == 0:
+            window += 1
+        continuum = medfilt(flux, kernel_size=window)
+    
+    else:
+        raise ValueError(f"Unknown continuum method: {method}")
+    
+    # Avoid division by zero
+    continuum = np.where(continuum > 0, continuum, 1.0)
+    normalized_flux = flux / continuum
+    
+    if u is None:
+        return spectrum
+    
+    return Spectrum1D(
+        spectral_axis=spectrum.spectral_axis,
+        flux=normalized_flux * u.dimensionless_unscaled,
+        uncertainty=spectrum.uncertainty
+    )
+
+
+def convert_air_to_vacuum(wavelength_air: np.ndarray) -> np.ndarray:
+    """Convert air wavelengths to vacuum wavelengths.
+    
+    Uses IAU standard conversion formula (Morton 1991, ApJS, 77, 119).
+    Valid for wavelengths > 2000 Angstroms.
+    
+    Args:
+        wavelength_air: Wavelengths in air (Angstroms)
+    
+    Returns:
+        Wavelengths in vacuum (Angstroms)
+    """
+    s = 1e4 / wavelength_air  # Convert to wavenumber (micron^-1)
+    n = 1 + 0.0000834254 + 0.02406147 / (130 - s**2) + 0.00015998 / (38.9 - s**2)
+    return wavelength_air * n
+
+
+def convert_vacuum_to_air(wavelength_vac: np.ndarray) -> np.ndarray:
+    """Convert vacuum wavelengths to air wavelengths.
+    
+    Iterative inversion of air-to-vacuum formula.
+    
+    Args:
+        wavelength_vac: Wavelengths in vacuum (Angstroms)
+    
+    Returns:
+        Wavelengths in air (Angstroms)
+    """
+    # Iterative solution
+    wl_air = wavelength_vac.copy()
+    for _ in range(3):  # 3 iterations sufficient for convergence
+        wl_air = wavelength_vac / (1 + 0.0000834254 + 0.02406147 / (130 - (1e4/wl_air)**2) + 
+                                     0.00015998 / (38.9 - (1e4/wl_air)**2))
+    return wl_air
+
+
+def mask_telluric_regions(
+    spectrum,
+    regions: Optional[List[Tuple[float, float]]] = None
+) -> np.ndarray:
+    """Create mask for telluric absorption regions.
+    
+    Args:
+        spectrum: Input Spectrum1D object or wavelength array
+        regions: List of (wl_min, wl_max) tuples for telluric regions.
+                 If None, uses standard optical/NIR telluric bands.
+    
+    Returns:
+        Boolean mask array (True = good, False = telluric)
+    """
+    # Handle both Spectrum1D objects and plain wavelength arrays
+    if isinstance(spectrum, np.ndarray):
+        wavelength = spectrum
+    elif hasattr(spectrum, 'spectral_axis'):
+        wavelength = spectrum.spectral_axis.value
+    else:
+        # Assume it's a dict-like object with 'wavelength' key
+        wavelength = spectrum.get('wavelength', spectrum)
+    
+    if regions is None:
+        # Standard telluric regions in Angstroms
+        regions = [
+            (6860, 6960),   # B-band (O2)
+            (7580, 7700),   # A-band (O2)
+            (9300, 9600),   # Water vapor
+            (11100, 11500), # Water vapor
+            (13200, 14500)  # Water vapor
+        ]
+    
+    mask = np.ones(len(wavelength), dtype=bool)
+    for wl_min, wl_max in regions:
+        mask &= ~((wavelength >= wl_min) & (wavelength <= wl_max))
+    
+    return mask
+
+
+def correct_redshift(spectrum, z: float):
+    """Shift spectrum to rest frame.
+    
+    Args:
+        spectrum: Input Spectrum1D object or dict with 'wavelength' key
+        z: Redshift
+    
+    Returns:
+        Rest-frame Spectrum1D object or dict
+    """
+    # Handle dict representation
+    if isinstance(spectrum, dict):
+        rest_wavelength = spectrum['wavelength'] / (1 + z)
+        return {
+            'wavelength': rest_wavelength,
+            'flux': spectrum['flux'],
+            'uncertainty': spectrum.get('uncertainty')
+        }
+    
+    # Handle Spectrum1D object
+    rest_wavelength = spectrum.spectral_axis / (1 + z)
+    
+    if u is None:
+        return spectrum
+    
+    return Spectrum1D(
+        spectral_axis=rest_wavelength,
+        flux=spectrum.flux,
+        uncertainty=spectrum.uncertainty
+    )
     """
     Normalize the continuum of a spectrum.
 

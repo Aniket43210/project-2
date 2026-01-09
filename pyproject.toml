@@ -52,6 +52,9 @@ stellar_platform = ["py.typed"]
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "-v --cov=stellar_platform --cov-report=term-missing"
+filterwarnings = [
+    "ignore::pytest.PytestReturnNotNoneWarning"
+]
 
 [tool.black]
 line-length = 100

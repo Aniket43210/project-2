@@ -8,9 +8,16 @@ including light curves, stellar parameters, and catalogs.
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 import warnings
 import os
 from pathlib import Path
+import logging
+
+from stellar_platform.data.schemas import LightCurve, DataProvenance, QualityFlags
+from stellar_platform.data.ingestion.sync_state import get_sync_manager, SyncState
+
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover
     from lightkurve import search_lightcurve, LightCurve  # type: ignore
@@ -238,3 +245,145 @@ class KeplerTESSConnector:
             DataFrame with crossmatch results
         """
         return pd.DataFrame(columns=["ra", "dec", "target_id"])
+    def incremental_sync_lightcurves(
+        self,
+        mission: str = "TESS",
+        min_magnitude: float = 16.0,
+        batch_size: int = 50,
+        max_records: Optional[int] = None,
+        resume: bool = True
+    ) -> Dict[str, Any]:
+        """Incrementally sync light curves with resumable state tracking.
+        
+        Args:
+            mission: Mission name ("Kepler" or "TESS")
+            min_magnitude: Minimum target magnitude filter
+            batch_size: Number of light curves to fetch per batch
+            max_records: Maximum records to process (None = unlimited)
+            resume: Whether to resume from previous sync state
+        
+        Returns:
+            Dictionary with sync statistics
+        """
+        sync_manager = get_sync_manager()
+        survey_name = f"{mission.upper()}"
+        
+        # Load or create sync state
+        if resume:
+            state = sync_manager.load_state(survey_name)
+            if state is None:
+                state = SyncState(survey=survey_name)
+                logger.info(f"Starting new sync for {survey_name}")
+            else:
+                logger.info(f"Resuming sync for {survey_name} from {state.records_processed} records")
+        else:
+            state = SyncState(survey=survey_name)
+            logger.info(f"Starting fresh sync for {survey_name}")
+        
+        stats = {
+            "processed": 0,
+            "successful": 0,
+            "failed": 0,
+            "skipped": 0,
+            "start_time": datetime.now().isoformat()
+        }
+        
+        try:
+            # In a real implementation, this would query MAST incrementally
+            cursor = int(state.cursor or "0")
+            total_processed = state.records_processed
+            
+            while True:
+                # Check max_records limit
+                if max_records and total_processed >= max_records:
+                    logger.info(f"Reached max_records limit: {max_records}")
+                    break
+                
+                # Simulate batch fetch
+                logger.info(f"Fetching batch at cursor={cursor}, records={total_processed}")
+                
+                # Placeholder: in real implementation, query like:
+                # targets = query_tic_catalog(offset=cursor, limit=batch_size, min_mag=min_magnitude)
+                batch_results = []  # Would be actual query results
+                
+                if not batch_results:
+                    logger.info("No more records to process")
+                    break
+                
+                # Process each light curve in batch
+                for target_info in batch_results:
+                    try:
+                        # Download light curve
+                        lc_data = self.download_lightcurve(
+                            mission=mission,
+                            target=target_info['tic_id']
+                        )
+                        
+                        if lc_data:
+                            # Create LightCurve object with provenance
+                            provenance = DataProvenance(
+                                survey=survey_name,
+                                retrieval_timestamp=datetime.now(),
+                                query_params={"target": target_info['tic_id'], "mission": mission},
+                                version=target_info.get('data_release', 'latest')
+                            )
+                            
+                            quality = QualityFlags(
+                                is_valid=True,
+                                signal_to_noise=target_info.get('mean_flux', 0) / target_info.get('std_flux', 1) if target_info.get('std_flux') else None
+                            )
+                            
+                            lightcurve = LightCurve(
+                                time=lc_data['time'],
+                                flux=lc_data['flux'],
+                                flux_unc=lc_data.get('flux_err'),
+                                band=mission,
+                                provenance=provenance,
+                                quality=quality
+                            )
+                            
+                            # Save light curve (in real implementation: store to data lake)
+                            stats["successful"] += 1
+                        else:
+                            stats["skipped"] += 1
+                    
+                    except Exception as e:
+                        logger.error(f"Failed to process target: {e}")
+                        stats["failed"] += 1
+                        sync_manager.update_state(survey_name, increment_errors=True)
+                    
+                    stats["processed"] += 1
+                    total_processed += 1
+                    cursor += 1
+                    
+                    # Update state periodically
+                    if stats["processed"] % 10 == 0:
+                        sync_manager.update_state(
+                            survey_name,
+                            records_processed=total_processed,
+                            cursor=str(cursor)
+                        )
+                
+                # Update state after each batch
+                sync_manager.update_state(
+                    survey_name,
+                    records_processed=total_processed,
+                    cursor=str(cursor)
+                )
+        
+        except Exception as e:
+            logger.error(f"Sync failed: {e}")
+            sync_manager.update_state(survey_name, increment_errors=True)
+            stats["error"] = str(e)
+        
+        finally:
+            # Final state save
+            sync_manager.update_state(
+                survey_name,
+                records_processed=total_processed,
+                cursor=str(cursor)
+            )
+            stats["end_time"] = datetime.now().isoformat()
+            stats["total_records"] = total_processed
+        
+        return stats

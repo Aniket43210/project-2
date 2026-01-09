@@ -7,11 +7,32 @@ Design goals:
 - Minimal required fields for early phase
 - Validation of array lengths > 0
 - Support optional uncertainty arrays
-- Leave room for metadata provenance extension
+- Provenance tracking for data lineage
+- Quality flags for data filtering
 """
 from __future__ import annotations
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class DataProvenance(BaseModel):
+    """Provenance metadata for data lineage tracking."""
+    survey: str = Field(..., description="Survey or data source name (e.g., SDSS, Gaia, TESS)")
+    retrieval_timestamp: Optional[datetime] = Field(None, description="When data was retrieved")
+    query_params: Dict[str, Any] = Field(default_factory=dict, description="Query parameters used")
+    version: Optional[str] = Field(None, description="Survey data release version")
+    processing_pipeline: Optional[str] = Field(None, description="Pipeline version identifier")
+
+
+class QualityFlags(BaseModel):
+    """Quality flags for data validation and filtering."""
+    is_valid: bool = Field(True, description="Overall validity flag")
+    has_bad_pixels: bool = Field(False, description="Contains flagged bad pixels")
+    signal_to_noise: Optional[float] = Field(None, ge=0.0, description="Estimated S/N ratio")
+    contamination_flag: bool = Field(False, description="Possible contamination from nearby source")
+    flags: Dict[str, Any] = Field(default_factory=dict, description="Additional survey-specific flags")
+
 
 class Spectrum(BaseModel):
     wavelengths: List[float] = Field(..., description="Monotonic wavelength (or frequency) grid")
@@ -19,6 +40,8 @@ class Spectrum(BaseModel):
     flux_unc: Optional[List[float]] = Field(None, description="Optional 1-sigma uncertainties")
     instrument: Optional[str] = Field(None, description="Instrument or survey identifier")
     rest_frame: bool = Field(False, description="Whether wavelengths are in rest frame")
+    provenance: Optional[DataProvenance] = Field(None, description="Data lineage metadata")
+    quality: Optional[QualityFlags] = Field(None, description="Quality assessment flags")
 
     @field_validator('wavelengths')
     @classmethod
@@ -52,6 +75,8 @@ class LightCurve(BaseModel):
     flux: List[float] = Field(..., description="Flux or relative intensity values")
     flux_unc: Optional[List[float]] = Field(None, description="Optional uncertainties aligned with flux")
     band: Optional[str] = Field(None, description="Photometric band or passband code")
+    provenance: Optional[DataProvenance] = Field(None, description="Data lineage metadata")
+    quality: Optional[QualityFlags] = Field(None, description="Quality assessment flags")
 
     @field_validator('time')
     @classmethod
@@ -97,5 +122,5 @@ class SourceObject(BaseModel):
         return self
 
 __all__ = [
-    'Spectrum', 'LightCurve', 'SourceObject'
+    'Spectrum', 'LightCurve', 'SourceObject', 'DataProvenance', 'QualityFlags'
 ]
