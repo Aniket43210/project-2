@@ -27,6 +27,11 @@ function parseArray(text) {
 window.addEventListener('DOMContentLoaded', () => {
   const apiBaseEl = document.getElementById('apiBase');
   const apiKeyEl = document.getElementById('apiKey');
+  
+  // Auto-detect API base URL (works with localhost and Dev Tunnels)
+  const currentOrigin = window.location.origin;
+  apiBaseEl.value = currentOrigin;
+  console.log('API Base URL auto-detected:', currentOrigin);
 
   // Health
   document.getElementById('btnCheck').addEventListener('click', async () => {
